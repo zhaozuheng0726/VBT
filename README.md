@@ -56,6 +56,18 @@ That is the main claim of this repository.
 
 The scientific frontend is still included because it exercises the same packed 4D backend, file format, block table, and query path, but the storytelling priority is the renderer-facing asset path.
 
+### Important Scope Clarification
+
+This repository contains two different GPU-facing paths:
+
+1. `render/` is the standalone GPU query and benchmark path.
+   It is Vulkan-based and is mainly used for direct `(x, y, z, t)` queries, dense-vs-VBT comparisons, and scientific-style throughput measurements.
+
+2. `cycles_native_vbt/` plus `blender_patch/` is the renderer end-to-end path.
+   This is the native Cycles prototype, targeting CPU and CUDA inside Blender/Cycles. A `.vbtp` asset is loaded as a resident blob and sampled directly in the Cycles volume kernel.
+
+So if you only inspect the standalone build targets, you will mostly see Vulkan first. The CUDA path is present, but it lives inside the patched Blender/Cycles integration rather than as a separate CUDA demo executable in this repository.
+
 ### Core Idea
 
 VBT uses a packed `VBTPACK4` layout with:
@@ -160,6 +172,8 @@ If Vulkan is available:
 .vbtp asset -> Blender Volume object -> Cycles scene sync -> device buffers -> Cycles volume kernel sampler
 ```
 
+This is the actual renderer end-to-end path. In the current codebase, the native prototype is scoped to CPU and CUDA backends inside Cycles. The CUDA logic is embedded into the patched Cycles runtime, not exposed as a standalone CUDA benchmark binary here.
+
 Build the host-side sampler probe:
 
 ```powershell
@@ -199,6 +213,7 @@ Optional dependencies:
 
 - `OpenMP`: enabled automatically when available
 - `Vulkan SDK + glslc`: required for `vbt_query_bench`
+- patched Blender/Cycles source tree: required for the native CPU/CUDA end-to-end rendering path
 - `OpenVDB`: only required for `render_temporal_vbt_to_vdb`
 
 If you only want the encoder and native Cycles staging probe:
@@ -252,6 +267,18 @@ The paper describes the packed 4D backend, the scientific and rendering frontend
 这也是这个仓库真正想表达的系统价值。
 
 科学场前端仍然保留，因为它和渲染场共享同一个 packed 4D backend、offset table、payload pool 和查询骨架，但仓库的主叙事已经切换到 renderer-facing asset contract。
+
+### 需要特别说明的一点
+
+这个仓库里其实有两条不同的 GPU 路径，不应该混在一起理解：
+
+1. `render/` 是独立 GPU 查询和 benchmark 路径。
+   它基于 Vulkan，主要用于直接 `(x, y, z, t)` 查询、Dense 与 VBT 对比，以及更偏科学场风格的吞吐测试。
+
+2. `cycles_native_vbt/` 加 `blender_patch/` 才是渲染端到端路径。
+   这部分是原生 Cycles 原型，目标后端是 Blender/Cycles 内部的 CPU 和 CUDA。`.vbtp` 会作为常驻 blob 被加载，并直接在 Cycles 的 volume kernel 里完成采样。
+
+所以如果只看这个仓库里单独可编译的工具，最先看到的大多会是 Vulkan。真正的 CUDA 路径是存在的，但它藏在补丁后的 Blender/Cycles 运行时里，而不是这里单独放一个 CUDA demo 可执行文件。
 
 ### 核心思想
 
@@ -353,6 +380,8 @@ VBT 使用统一的 `VBTPACK4` 落盘布局：
 .vbtp asset -> Blender Volume object -> Cycles scene sync -> device buffers -> Cycles volume kernel sampler
 ```
 
+这条路径才是项目里的渲染端到端链路。当前代码里，原生路径的目标范围是 Cycles 的 CPU 和 CUDA 后端。也就是说，CUDA 逻辑并不是这里单独一个 benchmark 程序，而是嵌在补丁后的 Cycles 运行时内部。
+
 构建 host 侧采样 probe：
 
 ```powershell
@@ -392,6 +421,7 @@ cmake --build build --config Release
 
 - `OpenMP`：自动启用并行
 - `Vulkan SDK + glslc`：用于 `vbt_query_bench`
+- 打过补丁的 Blender/Cycles 源码：用于原生 CPU/CUDA 端到端渲染路径
 - `OpenVDB`：仅 `render_temporal_vbt_to_vdb` 需要
 
 如果只想保留主编码器和原生 Cycles probe：
