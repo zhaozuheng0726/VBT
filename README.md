@@ -3,11 +3,11 @@
 <p align="center">
   <a href="#english"><img alt="English" src="https://img.shields.io/badge/English-2F6FED?style=for-the-badge"></a>
   <a href="#中文"><img alt="中文" src="https://img.shields.io/badge/%E4%B8%AD%E6%96%87-C0392B?style=for-the-badge"></a>
-  <a href="./assets/paper/sigapaper.pdf"><img alt="Paper PDF" src="https://img.shields.io/badge/Paper-PDF-111111?style=for-the-badge"></a>
+  <a href="./assets/paper/VBT.pdf"><img alt="Paper PDF" src="https://img.shields.io/badge/Paper-PDF-111111?style=for-the-badge"></a>
 </p>
 
 <p align="center">
-  <a href="./assets/paper/sigapaper.pdf">
+  <a href="./assets/paper/VBT.pdf">
     <img src="./assets/images/VBT.jpeg" alt="VBT teaser" width="900">
   </a>
 </p>
@@ -210,7 +210,7 @@ cmake --build build --config Release
 
 ### Paper
 
-- PDF: [sigapaper.pdf](./assets/paper/sigapaper.pdf)
+- PDF: [VBT.pdf](./assets/paper/VBT.pdf)
 
 The paper describes the packed 4D backend, the scientific and rendering frontends, the renderer-facing runtime contract, and the Blender/Cycles integration direction in more detail.
 
@@ -403,6 +403,6 @@ cmake --build build --config Release
 
 ### 论文
 
-- PDF: [sigapaper.pdf](./assets/paper/sigapaper.pdf)
+- PDF: [VBT.pdf](./assets/paper/VBT.pdf)
 
 论文里更完整地描述了 packed 4D backend、科学场/渲染场双前端、renderer-facing runtime contract，以及 Blender/Cycles 接入方向。
