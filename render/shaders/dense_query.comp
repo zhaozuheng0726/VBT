@@ -1,0 +1,66 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct QueryResult {
+    uint leafIndex;
+    uint packedHeader;
+    uint mode;
+    float value;
+};
+
+struct Query4D {
+    uint x;
+    uint y;
+    uint z;
+    uint t;
+};
+
+layout(std430, binding = 0) readonly buffer QueryBuffer {
+    Query4D queries[];
+};
+
+layout(std430, binding = 1) writeonly buffer ResultBuffer {
+    QueryResult results[];
+};
+
+layout(std430, binding = 2) readonly buffer FrameLookupBuffer {
+    uint frameSlot[];
+};
+
+layout(std430, binding = 3) readonly buffer DenseFrameBuffer {
+    float denseValues[];
+};
+
+layout(push_constant) uniform DenseQueryPushConstants {
+    uint dimX;
+    uint dimY;
+    uint dimZ;
+    uint frames;
+    uint queryCount;
+} pc;
+
+void main()
+{
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.queryCount) {
+        return;
+    }
+
+    const Query4D q = queries[gid];
+    const uint slot = frameSlot[q.t];
+
+    QueryResult outResult;
+    outResult.leafIndex = 0u;
+    outResult.packedHeader = 0u;
+    outResult.mode = 0u;
+    outResult.value = 0.0;
+
+    if (slot != 0xFFFFFFFFu) {
+        const uint frameVoxelCount = pc.dimX * pc.dimY * pc.dimZ;
+        const uint linear = (q.z * pc.dimY + q.y) * pc.dimX + q.x;
+        outResult.value = denseValues[slot * frameVoxelCount + linear];
+    }
+
+    results[gid] = outResult;
+}

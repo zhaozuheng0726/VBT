@@ -1,0 +1,1246 @@
+diff --git a/intern/cycles/blender/volume.cpp b/intern/cycles/blender/volume.cpp
+index 334a38e7..c6c67c54 100644
+--- a/intern/cycles/blender/volume.cpp
++++ b/intern/cycles/blender/volume.cpp
+@@ -5,6 +5,7 @@
+ #include "scene/volume.h"
+ #include "scene/image.h"
+ #include "scene/image_vdb.h"
++#include "scene/image_vbt.h"
+ #include "scene/object.h"
+ 
+ #include "blender/sync.h"
+@@ -23,6 +24,9 @@
+ 
+ #include "RNA_prototypes.hh"
+ 
++#include <algorithm>
++#include <cctype>
++
+ CCL_NAMESPACE_BEGIN
+ 
+ /* TODO: verify this is not loading unnecessary attributes. */
+@@ -307,6 +311,19 @@ class BlenderVolumeLoader : public VDBImageLoader {
+ #endif
+ };
+ 
++static bool is_vbt_pack_filepath(const string &filepath)
++{
++  if (filepath.size() < 5) {
++    return false;
++  }
++
++  string ext = filepath.substr(filepath.size() - 5);
++  std::transform(ext.begin(), ext.end(), ext.begin(), [](const unsigned char c) {
++    return char(std::tolower(c));
++  });
++  return ext == ".vbtp";
++}
++
+ static void sync_volume_object(blender::Main &b_data,
+                                blender::Scene &b_scene,
+                                BObjectInfo &b_ob_info,
+@@ -314,7 +331,12 @@ static void sync_volume_object(blender::Main &b_data,
+                                Volume *volume)
+ {
+   blender::Volume &b_volume = *blender::id_cast<blender::Volume *>(b_ob_info.object_data);
+-  BKE_volume_load(&b_volume, &b_data);
++  const string filepath = blender_absolute_path(b_data, &b_volume.id, b_volume.filepath);
++  const bool is_vbt_volume = is_vbt_pack_filepath(filepath);
++
++  if (!is_vbt_volume) {
++    BKE_volume_load(&b_volume, &b_data);
++  }
+ 
+   blender::VolumeRender &b_render = b_volume.render;
+ 
+@@ -334,6 +356,22 @@ static void sync_volume_object(blender::Main &b_data,
+ 
+   volume->set_velocity_scale(velocity_scale);
+ 
++  if (is_vbt_volume) {
++    if (volume->need_attribute(scene, ATTR_STD_VOLUME_DENSITY)) {
++      Attribute *attr = volume->attributes.add(ATTR_STD_VOLUME_DENSITY);
++
++      const int frame_index = b_scene.r.cfra;
++      unique_ptr<ImageLoader> loader = make_unique<VBTImageLoader>(filepath, frame_index);
++      ImageParams params;
++      params.animated = true;
++      params.frame = float(frame_index);
++
++      attr->data_voxel_for_write() = scene->image_manager->add_image(std::move(loader),
++                                                                     params,
++                                                                     false);
++    }
++  }
++  else {
+ #ifdef WITH_OPENVDB
+   /* Find grid with matching name. */
+   for (const int grid_index : blender::IndexRange(BKE_volume_num_grids(&b_volume))) {
+@@ -398,18 +436,25 @@ static void sync_volume_object(blender::Main &b_data,
+     }
+   }
+ #endif
++  }
+ 
+   /* Create a matrix to transform from object space to normalized texture space [0, 1]. */
+   if (volume->need_attribute(scene, ATTR_STD_GENERATED_TRANSFORM)) {
+-    std::optional<const blender::Bounds<blender::float3>> bounds = BKE_volume_min_max(&b_volume);
+-
+-    const blender::float3 size = bounds->size();
+-    const float3 loc = make_float3(bounds->min[0], bounds->min[1], bounds->min[2]);
+-    const float3 inv_size = safe_divide(one_float3(), make_float3(size[0], size[1], size[2]));
+-
+     Attribute *attr = volume->attributes.add(ATTR_STD_GENERATED_TRANSFORM);
+     Transform *tfm = attr->data_transform_for_write();
+-    *tfm = transform_scale(inv_size) * transform_translate(-loc);
++
++    if (is_vbt_volume) {
++      *tfm = transform_identity();
++    }
++    else {
++      std::optional<const blender::Bounds<blender::float3>> bounds = BKE_volume_min_max(&b_volume);
++
++      const blender::float3 size = bounds->size();
++      const float3 loc = make_float3(bounds->min[0], bounds->min[1], bounds->min[2]);
++      const float3 inv_size = safe_divide(one_float3(), make_float3(size[0], size[1], size[2]));
++
++      *tfm = transform_scale(inv_size) * transform_translate(-loc);
++    }
+   }
+ }
+ 
+diff --git a/intern/cycles/device/memory.cpp b/intern/cycles/device/memory.cpp
+index 27ca4036..e07b26a4 100644
+--- a/intern/cycles/device/memory.cpp
++++ b/intern/cycles/device/memory.cpp
+@@ -38,6 +38,8 @@ static const char *name_from_type(ImageDataType type)
+       return "nanovdb_fp16";
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
+       return "nanovdb_empty";
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
++      return "vbt_density";
+     case IMAGE_DATA_NUM_TYPES:
+       assert(!"System enumerator type, should never be used");
+       return "";
+@@ -239,6 +241,7 @@ device_image::device_image(Device *device,
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_FP16:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+       data_type = TYPE_UCHAR;
+       data_elements = 1;
+       break;
+diff --git a/intern/cycles/kernel/CMakeLists.txt b/intern/cycles/kernel/CMakeLists.txt
+index de9240a3..8fb6100a 100644
+--- a/intern/cycles/kernel/CMakeLists.txt
++++ b/intern/cycles/kernel/CMakeLists.txt
+@@ -244,6 +244,7 @@ set(SRC_KERNEL_UTIL_HEADERS
+   util/lookup_table.h
+   util/nanovdb.h
+   util/profiler.h
++  util/vbt.h
+ )
+ 
+ set(SRC_KERNEL_TYPES_HEADERS
+diff --git a/intern/cycles/kernel/osl/services_shared.h b/intern/cycles/kernel/osl/services_shared.h
+index fab1bebf..b778ef88 100644
+--- a/intern/cycles/kernel/osl/services_shared.h
++++ b/intern/cycles/kernel/osl/services_shared.h
+@@ -664,6 +664,7 @@ ccl_device bool osl_shared_get_texture_info(KernelGlobals kg,
+         case IMAGE_DATA_TYPE_NANOVDB_FLOAT:
+         case IMAGE_DATA_TYPE_NANOVDB_FPN:
+         case IMAGE_DATA_TYPE_NANOVDB_FP16:
++        case IMAGE_DATA_TYPE_VBT_DENSITY:
+           channels = 1;
+           break;
+         case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
+diff --git a/intern/cycles/kernel/util/image_3d.h b/intern/cycles/kernel/util/image_3d.h
+index 026c1170..dbc8f56a 100644
+--- a/intern/cycles/kernel/util/image_3d.h
++++ b/intern/cycles/kernel/util/image_3d.h
+@@ -6,6 +6,7 @@
+ 
+ #include "kernel/globals.h"
+ #include "kernel/sample/lcg.h"
++#include "kernel/util/vbt.h"
+ 
+ #include "util/types_image.h"
+ 
+@@ -207,7 +208,6 @@ ccl_device float4 kernel_image_interp_3d(KernelGlobals kg,
+                                          InterpolationType interp,
+                                          const bool stochastic)
+ {
+-#ifdef WITH_NANOVDB
+   const ccl_global KernelImageTexture &tex = kernel_data_fetch(image_textures, image_texture_id);
+   const ccl_global KernelImageInfo &info = kernel_data_fetch(image_info, tex.image_info_id);
+ 
+@@ -219,12 +219,18 @@ ccl_device float4 kernel_image_interp_3d(KernelGlobals kg,
+                                         (InterpolationType)info.interpolation :
+                                         interp;
+ 
++  const ImageDataType data_type = (ImageDataType)info.data_type;
++  if (data_type == IMAGE_DATA_TYPE_VBT_DENSITY) {
++    const float f = kernel_image_interp_vbt_density(info, P);
++    return make_float4(f, f, f, 1.0f);
++  }
++
++#ifdef WITH_NANOVDB
+   if (stochastic) {
+     float3 rand = lcg_step_float3(&sd->lcg_state);
+     P = interp_stochastic(P, interpolation, rand);
+   }
+ 
+-  const ImageDataType data_type = (ImageDataType)info.data_type;
+   if (data_type == IMAGE_DATA_TYPE_NANOVDB_FLOAT) {
+     const float f = kernel_image_interp_nanovdb<float, float>(info, P, interpolation);
+     return make_float4(f, f, f, 1.0f);
+@@ -248,12 +254,9 @@ ccl_device float4 kernel_image_interp_3d(KernelGlobals kg,
+     return zero_float4();
+   }
+ #else
+-  (void)kg;
+   (void)sd;
+-  (void)image_texture_id;
+-  (void)P;
+-  (void)interp;
+   (void)stochastic;
++  (void)interpolation;
+ #endif
+ 
+   return IMAGE_MISSING_RGBA;
+diff --git a/intern/cycles/scene/CMakeLists.txt b/intern/cycles/scene/CMakeLists.txt
+index 4b6807c7..d5c446e6 100644
+--- a/intern/cycles/scene/CMakeLists.txt
++++ b/intern/cycles/scene/CMakeLists.txt
+@@ -30,6 +30,7 @@ set(SRC
+   image_oiio.cpp
+   image_sky.cpp
+   image_vdb.cpp
++  image_vbt.cpp
+   integrator.cpp
+   light.cpp
+   light_tree.cpp
+@@ -71,6 +72,7 @@ set(SRC_HEADERS
+   image_oiio.h
+   image_sky.h
+   image_vdb.h
++  image_vbt.h
+   integrator.h
+   light.h
+   light_tree.h
+diff --git a/intern/cycles/scene/image_cache.cpp b/intern/cycles/scene/image_cache.cpp
+index 42dc2b7a..01c17e99 100644
+--- a/intern/cycles/scene/image_cache.cpp
++++ b/intern/cycles/scene/image_cache.cpp
+@@ -333,6 +333,16 @@ device_image *ImageCache::load_image_full(Device &device,
+ #endif
+       break;
+     }
++    case IMAGE_DATA_TYPE_VBT_DENSITY: {
++      mem = &alloc_full(
++          device, type, interpolation, extension, metadata.nanovdb_byte_size, 0, image_info_id);
++
++      uint8_t *pixels = mem->data<uint8_t>();
++      if (pixels) {
++        loader.load_pixels(metadata, pixels);
++      }
++      break;
++    }
+     case IMAGE_DATA_NUM_TYPES:
+       break;
+   }
+diff --git a/intern/cycles/scene/image_oiio.cpp b/intern/cycles/scene/image_oiio.cpp
+index e39745c5..b6c982ff 100644
+--- a/intern/cycles/scene/image_oiio.cpp
++++ b/intern/cycles/scene/image_oiio.cpp
+@@ -210,6 +210,7 @@ static bool oiio_load_pixels_tile(const unique_ptr<ImageInput> &in,
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_FP16:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+     case IMAGE_DATA_NUM_TYPES:
+       return false;
+   }
+diff --git a/intern/cycles/scene/volume.cpp b/intern/cycles/scene/volume.cpp
+index 9c2b7906..37994f38 100644
+--- a/intern/cycles/scene/volume.cpp
++++ b/intern/cycles/scene/volume.cpp
+@@ -24,11 +24,14 @@
+ #include "util/path.h"
+ #include "util/progress.h"
+ #include "util/types.h"
++#include "util/types_image.h"
+ 
+ #include "bvh/octree.h"
+ 
+ #include <OpenImageIO/filesystem.h>
+ 
++#include <algorithm>
++
+ CCL_NAMESPACE_BEGIN
+ 
+ NODE_DEFINE(Volume)
+@@ -607,6 +610,77 @@ static void merge_scalar_grids_for_velocity(const Scene *scene, Volume *volume)
+ 
+ /* ************************************************************************** */
+ 
++static const KernelVBTHeader *find_vbt_header_for_volume(Volume *volume)
++{
++  for (Attribute &attr : volume->attributes.attributes) {
++    if (attr.element != ATTR_ELEMENT_VOXEL) {
++      continue;
++    }
++
++    ImageHandle &handle = attr.data_voxel_for_write();
++    if (handle.empty()) {
++      continue;
++    }
++
++    device_image *image = handle.resident_image_memory();
++    if (image == nullptr || image->host_pointer == nullptr ||
++        image->info.data_type != IMAGE_DATA_TYPE_VBT_DENSITY ||
++        image->memory_size() < sizeof(KernelVBTHeader))
++    {
++      continue;
++    }
++
++    const KernelVBTHeader *header = static_cast<const KernelVBTHeader *>(image->host_pointer);
++    if (header->magic == KERNEL_VBT_BLOB_MAGIC && header->dim_x > 0u && header->dim_y > 0u &&
++        header->dim_z > 0u)
++    {
++      return header;
++    }
++  }
++
++  return nullptr;
++}
++
++static bool create_vbt_volume_box_mesh(Volume *volume, Shader *volume_shader)
++{
++  const KernelVBTHeader *header = find_vbt_header_for_volume(volume);
++  if (header == nullptr) {
++    return false;
++  }
++
++  (void)header;
++
++  const float3 vertices[8] = {
++      make_float3(0.0f, 0.0f, 0.0f),
++      make_float3(1.0f, 0.0f, 0.0f),
++      make_float3(1.0f, 1.0f, 0.0f),
++      make_float3(0.0f, 1.0f, 0.0f),
++      make_float3(0.0f, 0.0f, 1.0f),
++      make_float3(1.0f, 0.0f, 1.0f),
++      make_float3(1.0f, 1.0f, 1.0f),
++      make_float3(0.0f, 1.0f, 1.0f),
++  };
++  const int indices[36] = {
++      0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
++      1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7,
++  };
++
++  volume->resize_mesh(8, 12);
++  array<Node *> used_shaders;
++  used_shaders.push_back_slow(volume_shader);
++  volume->set_used_shaders(used_shaders);
++
++  std::copy(vertices, vertices + 8, volume->get_verts().data());
++  std::copy(indices, indices + 36, volume->get_triangles().data());
++  std::ranges::fill(volume->get_shader(), 0);
++  std::ranges::fill(volume->get_smooth(), false);
++
++  LOG_DEBUG << "Memory usage VBT volume mesh: "
++            << (sizeof(vertices) + sizeof(indices)) / (1024.0 * 1024.0) << "Mb.";
++
++  return true;
++}
++
+ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Progress &progress)
+ {
+   const string msg = string_printf("Computing Volume Mesh %s", volume->name.c_str());
+@@ -646,6 +720,10 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
+     return;
+   }
+ 
++  if (create_vbt_volume_box_mesh(volume, volume_shader)) {
++    return;
++  }
++
+ #if defined(WITH_OPENVDB) && defined(WITH_NANOVDB)
+   /* Create volume mesh builder. */
+   VolumeMeshBuilder builder;
+@@ -662,7 +740,7 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
+     }
+ 
+     /* Create NanoVDB grid handle from image memory. */
+-    device_image *image = handle.vdb_image_memory();
++    device_image *image = handle.resident_image_memory();
+     if (image == nullptr || image->host_pointer == nullptr ||
+         image->info.data_type == IMAGE_DATA_TYPE_NANOVDB_EMPTY ||
+         !is_nanovdb_type(image->info.data_type))
+diff --git a/intern/cycles/util/image_metadata.cpp b/intern/cycles/util/image_metadata.cpp
+index 92c0a18f..28867ef2 100644
+--- a/intern/cycles/util/image_metadata.cpp
++++ b/intern/cycles/util/image_metadata.cpp
+@@ -72,6 +72,7 @@ TypeDesc ImageMetaData::typedesc() const
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_FP16:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+     case IMAGE_DATA_NUM_TYPES:
+       assert(!"Unknown data type");
+       break;
+@@ -105,6 +106,7 @@ size_t ImageMetaData::pixel_memory_size() const
+       return sizeof(float) * 4;
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+     case IMAGE_DATA_NUM_TYPES:
+       break;
+   }
+@@ -114,8 +116,8 @@ size_t ImageMetaData::pixel_memory_size() const
+ 
+ size_t ImageMetaData::memory_size() const
+ {
+-  /* For NanoVDB, the byte size is stored directly. */
+-  if (is_nanovdb_type(type)) {
++  /* Resident volume blobs store their byte size directly. */
++  if (is_resident_image_buffer_type(type)) {
+     return nanovdb_byte_size;
+   }
+ 
+@@ -199,6 +201,7 @@ void ImageMetaData::make_float()
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_FP16:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+     case IMAGE_DATA_NUM_TYPES:
+       break;
+   }
+@@ -621,6 +624,7 @@ void ImageMetaData::conform_pixels(void *pixels,
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_FP16:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+     case IMAGE_DATA_NUM_TYPES:
+       break;
+   }
+@@ -804,6 +808,7 @@ bool ImageMetaData::oiio_load_pixels(OIIO::string_view filepath,
+     case IMAGE_DATA_TYPE_NANOVDB_FPN:
+     case IMAGE_DATA_TYPE_NANOVDB_FP16:
+     case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
++    case IMAGE_DATA_TYPE_VBT_DENSITY:
+     case IMAGE_DATA_NUM_TYPES:
+       break;
+   }
+diff --git a/intern/cycles/util/types_image.h b/intern/cycles/util/types_image.h
+index 071fd675..c5bb6d85 100644
+--- a/intern/cycles/util/types_image.h
++++ b/intern/cycles/util/types_image.h
+@@ -46,6 +46,7 @@ enum ImageDataType {
+   IMAGE_DATA_TYPE_NANOVDB_FPN = 11,
+   IMAGE_DATA_TYPE_NANOVDB_FP16 = 12,
+   IMAGE_DATA_TYPE_NANOVDB_EMPTY = 13,
++  IMAGE_DATA_TYPE_VBT_DENSITY = 14,
+ 
+   IMAGE_DATA_NUM_TYPES
+ };
+@@ -55,6 +56,40 @@ ccl_device_inline bool is_nanovdb_type(int type)
+   return (type >= IMAGE_DATA_TYPE_NANOVDB_FLOAT && type <= IMAGE_DATA_TYPE_NANOVDB_EMPTY);
+ }
+ 
++ccl_device_inline bool is_vbt_type(int type)
++{
++  return type == IMAGE_DATA_TYPE_VBT_DENSITY;
++}
++
++ccl_device_inline bool is_resident_image_buffer_type(int type)
++{
++  return is_nanovdb_type(type) || is_vbt_type(type);
++}
++
++#define KERNEL_VBT_BLOB_MAGIC 0x31544256U /* "VBT1" in little-endian byte order. */
++
++struct KernelVBTHeader {
++  uint magic = KERNEL_VBT_BLOB_MAGIC;
++  uint version = 1;
++  uint dim_x = 0;
++  uint dim_y = 0;
++  uint dim_z = 0;
++  uint frames = 0;
++  uint leaf_size = 0;
++  uint leaf_count_x = 0;
++  uint leaf_count_y = 0;
++  uint leaf_count_z = 0;
++  uint leaf_count = 0;
++  uint frame_index = 0;
++  uint offsets_word_count = 0;
++  uint payload_word_count = 0;
++  uint offsets_byte_offset = 0;
++  uint payload_byte_offset = 0;
++  float bbox_min_x = 0.0f;
++  float bbox_min_y = 0.0f;
++  float bbox_min_z = 0.0f;
++};
++
+ /* Alpha types
+  * How to treat alpha in images. */
+ enum ImageAlphaType {
+diff --git a/intern/cycles/kernel/util/vbt.h b/intern/cycles/kernel/util/vbt.h
+new file mode 100644
+index 00000000..38897f47
+--- /dev/null
++++ b/intern/cycles/kernel/util/vbt.h
+@@ -0,0 +1,470 @@
++/* SPDX-FileCopyrightText: 2026
++ *
++ * SPDX-License-Identifier: Apache-2.0 */
++
++#pragma once
++
++#include "util/types_image.h"
++
++CCL_NAMESPACE_BEGIN
++
++enum {
++  VBT_MODE_EMPTY = 0u,
++  VBT_MODE_TEMPORAL_GRID4 = 1u,
++  VBT_MODE_TEMPORAL_FINE_COMPACT_RESERVED = 2u,
++  VBT_MODE_TEMPORAL_FINE6 = 3u,
++  VBT_TIME_BIN_COUNT = 8u,
++};
++
++struct VBTPayloadView {
++  ccl_global const KernelVBTHeader *header;
++  ccl_global const uint *offset_words;
++  ccl_global const uint *payload_words;
++};
++
++ccl_device_inline uint vbt_min_u32(const uint a, const uint b)
++{
++  return a < b ? a : b;
++}
++
++ccl_device_inline uint vbt_max_u32(const uint a, const uint b)
++{
++  return a > b ? a : b;
++}
++
++ccl_device_inline int vbt_clamp_i32(const int v, const int lo, const int hi)
++{
++  return v < lo ? lo : (v > hi ? hi : v);
++}
++
++ccl_device_inline float vbt_clamp_f32(const float v, const float lo, const float hi)
++{
++  return v < lo ? lo : (v > hi ? hi : v);
++}
++
++ccl_device_inline float vbt_mix_f32(const float a, const float b, const float t)
++{
++  return a * (1.0f - t) + b * t;
++}
++
++ccl_device_inline uint vbt_align_up4(const uint bytes)
++{
++  return (bytes + 3u) & ~3u;
++}
++
++ccl_device_inline float vbt_uint_as_float(const uint bits)
++{
++  union {
++    uint u;
++    float f;
++  } cvt;
++  cvt.u = bits;
++  return cvt.f;
++}
++
++ccl_device_inline ccl_global const uint *vbt_blob_offsets(
++    ccl_global const KernelVBTHeader *header)
++{
++  return (ccl_global const uint *)(((ccl_global const uint8_t *)header) +
++                                  header->offsets_byte_offset);
++}
++
++ccl_device_inline ccl_global const uint *vbt_blob_payload(
++    ccl_global const KernelVBTHeader *header)
++{
++  return (ccl_global const uint *)(((ccl_global const uint8_t *)header) +
++                                  header->payload_byte_offset);
++}
++
++ccl_device_inline uint vbt_read_payload_byte(ccl_global const uint *payload,
++                                             const uint byte_offset)
++{
++  const uint word = payload[byte_offset >> 2u];
++  const uint shift = (byte_offset & 3u) * 8u;
++  return (word >> shift) & 0xffu;
++}
++
++ccl_device_inline uint vbt_read_payload_u16(ccl_global const uint *payload,
++                                            const uint byte_offset)
++{
++  return vbt_read_payload_byte(payload, byte_offset) |
++         (vbt_read_payload_byte(payload, byte_offset + 1u) << 8u);
++}
++
++ccl_device_inline float vbt_half_to_float(uint h)
++{
++  const uint sign = (h >> 15u) & 1u;
++  uint exponent = (h >> 10u) & 0x1fu;
++  uint mantissa = h & 0x3ffu;
++  uint bits = 0u;
++
++  if (exponent == 0u) {
++    if (mantissa == 0u) {
++      bits = sign << 31u;
++    }
++    else {
++      int e = -14;
++      while ((mantissa & 0x400u) == 0u) {
++        mantissa <<= 1u;
++        --e;
++      }
++      mantissa &= 0x3ffu;
++      bits = (sign << 31u) | (uint(e + 127) << 23u) | (mantissa << 13u);
++    }
++  }
++  else if (exponent == 31u) {
++    bits = (sign << 31u) | 0x7f800000u | (mantissa << 13u);
++  }
++  else {
++    bits = (sign << 31u) | ((exponent + 112u) << 23u) | (mantissa << 13u);
++  }
++
++  return vbt_uint_as_float(bits);
++}
++
++ccl_device_inline float vbt_read_keyframe_value(ccl_global const uint *payload,
++                                                const uint key_base,
++                                                const uint codec,
++                                                const uint key_index,
++                                                ccl_private uint *key_frame)
++{
++  if (codec == 1u) {
++    const uint offset = key_base + key_index * 8u;
++    *key_frame = vbt_read_payload_u16(payload, offset);
++    const uint bits = vbt_read_payload_byte(payload, offset + 4u) |
++                      (vbt_read_payload_byte(payload, offset + 5u) << 8u) |
++                      (vbt_read_payload_byte(payload, offset + 6u) << 16u) |
++                      (vbt_read_payload_byte(payload, offset + 7u) << 24u);
++    return vbt_uint_as_float(bits);
++  }
++
++  const uint offset = key_base + key_index * 3u;
++  *key_frame = vbt_read_payload_byte(payload, offset);
++  return vbt_half_to_float(vbt_read_payload_u16(payload, offset + 1u));
++}
++
++ccl_device_inline float vbt_decode_temporal_control_value(ccl_global const uint *payload,
++                                                          const uint stream_base,
++                                                          const uint codec,
++                                                          const uint control_count,
++                                                          const uint keyframe_count,
++                                                          const uint control_index,
++                                                          const int total_frames,
++                                                          const int frame_index)
++{
++  (void)keyframe_count;
++
++  const uint descriptor_bytes = control_count * 4u;
++  const uint bin_index_bytes = vbt_align_up4(control_count * VBT_TIME_BIN_COUNT);
++  const uint key_base = stream_base + descriptor_bytes + bin_index_bytes;
++
++  const uint desc_offset = stream_base + control_index * 4u;
++  const uint key_start = vbt_read_payload_u16(payload, desc_offset);
++  const uint key_count = vbt_read_payload_byte(payload, desc_offset + 2u);
++  const uint reserved = vbt_read_payload_byte(payload, desc_offset + 3u);
++
++  if (key_count == 0u) {
++    return 0.0f;
++  }
++  if (key_count == 1u) {
++    uint only_frame = 0u;
++    return vbt_read_keyframe_value(payload, key_base, codec, key_start, &only_frame);
++  }
++
++  const int clamped_frame = vbt_clamp_i32(frame_index, 0, total_frames > 0 ? total_frames - 1 : 0);
++  const uint safe_total_frames = vbt_max_u32(uint(total_frames), 1u);
++  const uint bin = vbt_min_u32(VBT_TIME_BIN_COUNT - 1u,
++                               (uint(clamped_frame) * VBT_TIME_BIN_COUNT) / safe_total_frames);
++  const uint bin_base = stream_base + descriptor_bytes + control_index * VBT_TIME_BIN_COUNT;
++  int begin_local = int(vbt_read_payload_byte(payload, bin_base + bin));
++  begin_local = vbt_clamp_i32(begin_local, 0, int(key_count) - 1);
++
++  int end_local = int(key_count);
++  for (int next = int(bin) + 1; next < int(VBT_TIME_BIN_COUNT); ++next) {
++    const int next_local = int(vbt_read_payload_byte(payload, bin_base + uint(next)));
++    if (next_local > begin_local) {
++      end_local = next_local < int(key_count) ? next_local : int(key_count);
++      break;
++    }
++  }
++
++  const int local_max_bin_keys = reserved != 0u ? int(reserved) : 8;
++  const int bounded_end = begin_local + (local_max_bin_keys > 1 ? local_max_bin_keys : 1);
++  end_local = end_local < bounded_end ? end_local : bounded_end;
++
++  int prev_local = begin_local;
++  int curr_local = begin_local;
++  while (curr_local < end_local) {
++    uint curr_frame = 0u;
++    const float curr_value = vbt_read_keyframe_value(
++        payload, key_base, codec, key_start + uint(curr_local), &curr_frame);
++    if (int(curr_frame) >= clamped_frame) {
++      if (int(curr_frame) <= clamped_frame || curr_local == prev_local) {
++        return curr_value;
++      }
++
++      uint prev_frame = 0u;
++      const float prev_value = vbt_read_keyframe_value(
++          payload, key_base, codec, key_start + uint(prev_local), &prev_frame);
++      const int f0 = int(prev_frame);
++      const int f1 = int(curr_frame);
++      if (f1 <= f0) {
++        return prev_value;
++      }
++
++      const float alpha = float(clamped_frame - f0) / float(f1 - f0);
++      return vbt_mix_f32(prev_value, curr_value, alpha);
++    }
++
++    prev_local = curr_local;
++    ++curr_local;
++  }
++
++  uint last_frame = 0u;
++  return vbt_read_keyframe_value(payload, key_base, codec, key_start + key_count - 1u, &last_frame);
++}
++
++ccl_device_inline float vbt_control_coord(const uint index, const uint resolution)
++{
++  return resolution <= 1u ? 0.0f : float(index) * (7.0f / float(resolution - 1u));
++}
++
++ccl_device_inline void vbt_locate_coord(const float p,
++                                        const uint extent,
++                                        const uint resolution,
++                                        ccl_private uint *i0,
++                                        ccl_private uint *i1,
++                                        ccl_private float *w)
++{
++  if (resolution <= 1u) {
++    *i0 = 0u;
++    *i1 = 0u;
++    *w = 0.0f;
++    return;
++  }
++
++  const float max_p = float(extent > 0u ? extent - 1u : 0u);
++  const float clamped = vbt_clamp_f32(p, 0.0f, max_p);
++  uint hi = 1u;
++  while (hi < resolution - 1u && vbt_control_coord(hi, resolution) < clamped) {
++    ++hi;
++  }
++
++  const uint lo = hi > 0u ? hi - 1u : 0u;
++  const float c0 = vbt_control_coord(lo, resolution);
++  const float c1 = vbt_control_coord(hi, resolution);
++  *i0 = lo;
++  *i1 = hi;
++  *w = c1 > c0 ? ((clamped - c0) / (c1 - c0)) : 0.0f;
++}
++
++ccl_device_inline uint vbt_control_index3(const uint x,
++                                          const uint y,
++                                          const uint z,
++                                          const uint resolution)
++{
++  return (z * resolution + y) * resolution + x;
++}
++
++ccl_device_inline float vbt_sample_control_stream(const VBTPayloadView vbt,
++                                                  const uint stream_base,
++                                                  const uint codec,
++                                                  const uint resolution,
++                                                  const uint keyframe_count,
++                                                  const uint leaf_width,
++                                                  const uint leaf_height,
++                                                  const uint leaf_depth,
++                                                  const float lx,
++                                                  const float ly,
++                                                  const float lz)
++{
++  if (resolution == 0u) {
++    return 0.0f;
++  }
++
++  uint x0 = 0u, x1 = 0u, y0 = 0u, y1 = 0u, z0 = 0u, z1 = 0u;
++  float tx = 0.0f, ty = 0.0f, tz = 0.0f;
++  vbt_locate_coord(lx, leaf_width, resolution, &x0, &x1, &tx);
++  vbt_locate_coord(ly, leaf_height, resolution, &y0, &y1, &ty);
++  vbt_locate_coord(lz, leaf_depth, resolution, &z0, &z1, &tz);
++
++  const uint control_count = resolution * resolution * resolution;
++  ccl_global const KernelVBTHeader *h = vbt.header;
++  ccl_global const uint *payload = vbt.payload_words;
++
++  const float v000 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x0, y0, z0, resolution), int(h->frames), int(h->frame_index));
++  const float v100 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x1, y0, z0, resolution), int(h->frames), int(h->frame_index));
++  const float v010 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x0, y1, z0, resolution), int(h->frames), int(h->frame_index));
++  const float v110 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x1, y1, z0, resolution), int(h->frames), int(h->frame_index));
++  const float v001 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x0, y0, z1, resolution), int(h->frames), int(h->frame_index));
++  const float v101 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x1, y0, z1, resolution), int(h->frames), int(h->frame_index));
++  const float v011 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x0, y1, z1, resolution), int(h->frames), int(h->frame_index));
++  const float v111 = vbt_decode_temporal_control_value(
++      payload, stream_base, codec, control_count, keyframe_count,
++      vbt_control_index3(x1, y1, z1, resolution), int(h->frames), int(h->frame_index));
++
++  const float c00 = vbt_mix_f32(v000, v100, tx);
++  const float c10 = vbt_mix_f32(v010, v110, tx);
++  const float c01 = vbt_mix_f32(v001, v101, tx);
++  const float c11 = vbt_mix_f32(v011, v111, tx);
++  return vbt_mix_f32(vbt_mix_f32(c00, c10, ty), vbt_mix_f32(c01, c11, ty), tz);
++}
++
++ccl_device_inline float vbt_sample_density_leaf_index(const VBTPayloadView vbt,
++                                                      const float x,
++                                                      const float y,
++                                                      const float z)
++{
++  ccl_global const KernelVBTHeader *h = vbt.header;
++  if (h->magic != KERNEL_VBT_BLOB_MAGIC || x < 0.0f || y < 0.0f || z < 0.0f ||
++      x > float(h->dim_x - 1u) || y > float(h->dim_y - 1u) || z > float(h->dim_z - 1u))
++  {
++    return 0.0f;
++  }
++
++  const uint xi = vbt_min_u32(h->dim_x - 1u, uint(x));
++  const uint yi = vbt_min_u32(h->dim_y - 1u, uint(y));
++  const uint zi = vbt_min_u32(h->dim_z - 1u, uint(z));
++  const uint bx = vbt_min_u32(h->leaf_count_x - 1u, xi / h->leaf_size);
++  const uint by = vbt_min_u32(h->leaf_count_y - 1u, yi / h->leaf_size);
++  const uint bz = vbt_min_u32(h->leaf_count_z - 1u, zi / h->leaf_size);
++  const uint leaf_index = (bz * h->leaf_count_y + by) * h->leaf_count_x + bx;
++
++  const uint word_begin = vbt.offset_words[leaf_index];
++  const uint word_end = vbt.offset_words[leaf_index + 1u];
++  if (word_end <= word_begin) {
++    return 0.0f;
++  }
++
++  const uint leaf_base_byte = word_begin * 4u;
++  const uint packed_header = vbt.payload_words[word_begin];
++  const uint mode = packed_header & 0x3u;
++  if (mode == VBT_MODE_EMPTY || mode == VBT_MODE_TEMPORAL_FINE_COMPACT_RESERVED) {
++    return 0.0f;
++  }
++
++  const uint coarse_codec = (packed_header >> 2u) & 0x3u;
++  const uint fine_codec = (packed_header >> 4u) & 0x3u;
++  const uint coarse_resolution = (packed_header >> 6u) & 0x7u;
++  const uint fine_resolution = (packed_header >> 9u) & 0x7u;
++  const uint coarse_keyframe_count = vbt_read_payload_u16(vbt.payload_words, leaf_base_byte + 4u);
++  const uint fine_keyframe_count = vbt_read_payload_u16(vbt.payload_words, leaf_base_byte + 6u);
++
++  const uint coarse_control_count = coarse_resolution * coarse_resolution * coarse_resolution;
++  const uint coarse_descriptor_bytes = coarse_control_count * 4u;
++  const uint coarse_bin_bytes = vbt_align_up4(coarse_control_count * VBT_TIME_BIN_COUNT);
++  const uint coarse_keyframe_stride = coarse_codec == 1u ? 8u : 3u;
++  const uint coarse_keyframe_bytes = vbt_align_up4(coarse_keyframe_count * coarse_keyframe_stride);
++  const uint coarse_stream_base = leaf_base_byte + 8u;
++  const uint fine_stream_base = coarse_stream_base + coarse_descriptor_bytes + coarse_bin_bytes +
++                                coarse_keyframe_bytes;
++
++  const uint base_x = bx * h->leaf_size;
++  const uint base_y = by * h->leaf_size;
++  const uint base_z = bz * h->leaf_size;
++  const uint leaf_width = vbt_min_u32(h->leaf_size, h->dim_x - base_x);
++  const uint leaf_height = vbt_min_u32(h->leaf_size, h->dim_y - base_y);
++  const uint leaf_depth = vbt_min_u32(h->leaf_size, h->dim_z - base_z);
++  const float lx = x - float(base_x);
++  const float ly = y - float(base_y);
++  const float lz = z - float(base_z);
++
++  float value = vbt_sample_control_stream(vbt,
++                                          coarse_stream_base,
++                                          coarse_codec,
++                                          coarse_resolution,
++                                          coarse_keyframe_count,
++                                          leaf_width,
++                                          leaf_height,
++                                          leaf_depth,
++                                          lx,
++                                          ly,
++                                          lz);
++
++  if (mode == VBT_MODE_TEMPORAL_FINE6 && fine_resolution > 0u) {
++    value += vbt_sample_control_stream(vbt,
++                                       fine_stream_base,
++                                       fine_codec,
++                                       fine_resolution,
++                                       fine_keyframe_count,
++                                       leaf_width,
++                                       leaf_height,
++                                       leaf_depth,
++                                       lx,
++                                       ly,
++                                       lz);
++  }
++
++  return value;
++}
++
++ccl_device_inline float vbt_sample_density_index(const VBTPayloadView vbt,
++                                                 const float x,
++                                                 const float y,
++                                                 const float z)
++{
++  ccl_global const KernelVBTHeader *h = vbt.header;
++  if (h->magic != KERNEL_VBT_BLOB_MAGIC || x < 0.0f || y < 0.0f || z < 0.0f ||
++      x > float(h->dim_x - 1u) || y > float(h->dim_y - 1u) || z > float(h->dim_z - 1u))
++  {
++    return 0.0f;
++  }
++
++  const uint x0 = vbt_min_u32(h->dim_x - 1u, uint(x));
++  const uint y0 = vbt_min_u32(h->dim_y - 1u, uint(y));
++  const uint z0 = vbt_min_u32(h->dim_z - 1u, uint(z));
++  const uint x1 = vbt_min_u32(h->dim_x - 1u, x0 + 1u);
++  const uint y1 = vbt_min_u32(h->dim_y - 1u, y0 + 1u);
++  const uint z1 = vbt_min_u32(h->dim_z - 1u, z0 + 1u);
++
++  const float tx = x1 > x0 ? x - float(x0) : 0.0f;
++  const float ty = y1 > y0 ? y - float(y0) : 0.0f;
++  const float tz = z1 > z0 ? z - float(z0) : 0.0f;
++
++  const float v000 = vbt_sample_density_leaf_index(vbt, float(x0), float(y0), float(z0));
++  const float v100 = vbt_sample_density_leaf_index(vbt, float(x1), float(y0), float(z0));
++  const float v010 = vbt_sample_density_leaf_index(vbt, float(x0), float(y1), float(z0));
++  const float v110 = vbt_sample_density_leaf_index(vbt, float(x1), float(y1), float(z0));
++  const float v001 = vbt_sample_density_leaf_index(vbt, float(x0), float(y0), float(z1));
++  const float v101 = vbt_sample_density_leaf_index(vbt, float(x1), float(y0), float(z1));
++  const float v011 = vbt_sample_density_leaf_index(vbt, float(x0), float(y1), float(z1));
++  const float v111 = vbt_sample_density_leaf_index(vbt, float(x1), float(y1), float(z1));
++
++  const float c00 = vbt_mix_f32(v000, v100, tx);
++  const float c10 = vbt_mix_f32(v010, v110, tx);
++  const float c01 = vbt_mix_f32(v001, v101, tx);
++  const float c11 = vbt_mix_f32(v011, v111, tx);
++  return vbt_mix_f32(vbt_mix_f32(c00, c10, ty), vbt_mix_f32(c01, c11, ty), tz);
++}
++
++ccl_device_inline float kernel_image_interp_vbt_density(const ccl_global KernelImageInfo &info,
++                                                        const float3 P)
++{
++  if (info.data == 0) {
++    return 0.0f;
++  }
++
++  ccl_global const KernelVBTHeader *header = (ccl_global const KernelVBTHeader *)info.data;
++  if (header->magic != KERNEL_VBT_BLOB_MAGIC) {
++    return 0.0f;
++  }
++
++  const VBTPayloadView vbt = {header, vbt_blob_offsets(header), vbt_blob_payload(header)};
++  return vbt_sample_density_index(vbt, P.x, P.y, P.z);
++}
++
++CCL_NAMESPACE_END
+diff --git a/intern/cycles/scene/image_vbt.h b/intern/cycles/scene/image_vbt.h
+new file mode 100644
+index 00000000..bd5a6eda
+--- /dev/null
++++ b/intern/cycles/scene/image_vbt.h
+@@ -0,0 +1,40 @@
++/* SPDX-FileCopyrightText: 2026
++ *
++ * SPDX-License-Identifier: Apache-2.0 */
++
++#pragma once
++
++#include "scene/image_loader.h"
++
++#include "util/vector.h"
++
++#include <cstdint>
++
++CCL_NAMESPACE_BEGIN
++
++class VBTImageLoader : public ImageLoader {
++ public:
++  VBTImageLoader(const string &filepath, const int frame_index);
++  ~VBTImageLoader() override;
++
++  bool load_metadata(ImageMetaData &metadata,
++                     const ImageLoaderParams &params,
++                     Progress &progress) override;
++
++  bool load_pixels(const ImageMetaData &metadata, void *pixels) override;
++
++  string name() const override;
++
++  bool equals(const ImageLoader &other) const override;
++
++  void cleanup() override;
++
++ private:
++  bool load_vbt_blob(string &error);
++
++  string filepath;
++  int frame_index = 0;
++  vector<uint8_t> blob;
++};
++
++CCL_NAMESPACE_END
+diff --git a/intern/cycles/scene/image_vbt.cpp b/intern/cycles/scene/image_vbt.cpp
+new file mode 100644
+index 00000000..83ada7e0
+--- /dev/null
++++ b/intern/cycles/scene/image_vbt.cpp
+@@ -0,0 +1,229 @@
++/* SPDX-FileCopyrightText: 2026
++ *
++ * SPDX-License-Identifier: Apache-2.0 */
++
++#include "scene/image_vbt.h"
++
++#include "util/image_metadata.h"
++#include "util/log.h"
++#include "util/transform.h"
++#include "util/types_image.h"
++
++#include <algorithm>
++#include <cstring>
++#include <fstream>
++
++CCL_NAMESPACE_BEGIN
++
++namespace {
++
++enum : uint32_t {
++  VBT_FIELD_DENSITY = 1u,
++};
++
++struct VBTPack4Header {
++  char magic[8];
++  uint32_t version;
++  uint32_t width;
++  uint32_t height;
++  uint32_t depth;
++  uint32_t frames;
++  uint32_t leaf_size;
++  uint32_t coarse_resolution;
++  uint32_t max_coarse_keep;
++  uint32_t leaf_count;
++  uint32_t profile_type;
++  uint32_t coarse_ac_scale_count;
++};
++
++template<typename T> bool read_value(std::ifstream &in, T &value)
++{
++  in.read(reinterpret_cast<char *>(&value), sizeof(T));
++  return static_cast<bool>(in);
++}
++
++uint32_t div_round_up_u32(const uint32_t value, const uint32_t divisor)
++{
++  return divisor == 0u ? 0u : (value + divisor - 1u) / divisor;
++}
++
++size_t align_up_4(const size_t value)
++{
++  return (value + 3u) & ~size_t(3u);
++}
++
++}  // namespace
++
++VBTImageLoader::VBTImageLoader(const string &filepath, const int frame_index)
++    : filepath(filepath), frame_index(frame_index)
++{
++}
++
++VBTImageLoader::~VBTImageLoader() = default;
++
++bool VBTImageLoader::load_vbt_blob(string &error)
++{
++  if (!blob.empty()) {
++    return true;
++  }
++
++  std::ifstream in(filepath, std::ios::binary);
++  if (!in) {
++    error = "Failed to open VBT file: " + filepath;
++    return false;
++  }
++
++  VBTPack4Header file_header = {};
++  in.read(file_header.magic, sizeof(file_header.magic));
++  if (!in || !read_value(in, file_header.version) || !read_value(in, file_header.width) ||
++      !read_value(in, file_header.height) || !read_value(in, file_header.depth) ||
++      !read_value(in, file_header.frames) || !read_value(in, file_header.leaf_size) ||
++      !read_value(in, file_header.coarse_resolution) ||
++      !read_value(in, file_header.max_coarse_keep) || !read_value(in, file_header.leaf_count) ||
++      !read_value(in, file_header.profile_type) ||
++      !read_value(in, file_header.coarse_ac_scale_count))
++  {
++    error = "Failed to read VBTPACK4 header: " + filepath;
++    return false;
++  }
++
++  if (std::strncmp(file_header.magic, "VBTPACK4", 8) != 0) {
++    error = "Unsupported VBT magic in " + filepath + ". Expected VBTPACK4.";
++    return false;
++  }
++  if (file_header.profile_type != VBT_FIELD_DENSITY) {
++    error = "Native Cycles VBT MVP only supports density VBTPACK4 files: " + filepath;
++    return false;
++  }
++  if (file_header.width == 0u || file_header.height == 0u || file_header.depth == 0u ||
++      file_header.frames == 0u || file_header.leaf_count == 0u)
++  {
++    error = "Invalid empty VBT dimensions or frame count: " + filepath;
++    return false;
++  }
++
++  const uint32_t leaf_size = file_header.leaf_size == 0u ? 8u : file_header.leaf_size;
++  const uint32_t leaf_count_x = div_round_up_u32(file_header.width, leaf_size);
++  const uint32_t leaf_count_y = div_round_up_u32(file_header.height, leaf_size);
++  const uint32_t leaf_count_z = div_round_up_u32(file_header.depth, leaf_size);
++  const uint64_t expected_leaf_count = uint64_t(leaf_count_x) * uint64_t(leaf_count_y) *
++                                       uint64_t(leaf_count_z);
++  if (expected_leaf_count != uint64_t(file_header.leaf_count)) {
++    error = "VBT leaf count does not match dimensions in " + filepath;
++    return false;
++  }
++
++  const uint64_t scale_bytes = uint64_t(file_header.coarse_ac_scale_count) * sizeof(float);
++  in.seekg(static_cast<std::streamoff>(scale_bytes), std::ios::cur);
++  if (!in) {
++    error = "Failed to skip VBT coarse AC scales: " + filepath;
++    return false;
++  }
++
++  vector<uint32_t> offsets(file_header.leaf_count + 1u);
++  in.read(reinterpret_cast<char *>(offsets.data()),
++          static_cast<std::streamsize>(offsets.size() * sizeof(uint32_t)));
++  if (!in) {
++    error = "Failed to read VBT offset table: " + filepath;
++    return false;
++  }
++
++  const uint32_t payload_word_count = offsets.back();
++  vector<uint32_t> payload(payload_word_count);
++  if (payload_word_count > 0u) {
++    in.read(reinterpret_cast<char *>(payload.data()),
++            static_cast<std::streamsize>(payload.size() * sizeof(uint32_t)));
++    if (!in) {
++      error = "Failed to read VBT payload pool: " + filepath;
++      return false;
++    }
++  }
++
++  const size_t offsets_byte_offset = align_up_4(sizeof(KernelVBTHeader));
++  const size_t payload_byte_offset = offsets_byte_offset + offsets.size() * sizeof(uint32_t);
++  const size_t blob_bytes = payload_byte_offset + payload.size() * sizeof(uint32_t);
++
++  blob.assign(blob_bytes, 0);
++
++  KernelVBTHeader header = {};
++  header.magic = KERNEL_VBT_BLOB_MAGIC;
++  header.version = 1u;
++  header.dim_x = file_header.width;
++  header.dim_y = file_header.height;
++  header.dim_z = file_header.depth;
++  header.frames = file_header.frames;
++  header.leaf_size = leaf_size;
++  header.leaf_count_x = leaf_count_x;
++  header.leaf_count_y = leaf_count_y;
++  header.leaf_count_z = leaf_count_z;
++  header.leaf_count = file_header.leaf_count;
++  header.frame_index = uint32_t(std::clamp(frame_index, 0, int(file_header.frames) - 1));
++  header.offsets_word_count = uint32_t(offsets.size());
++  header.payload_word_count = payload_word_count;
++  header.offsets_byte_offset = uint32_t(offsets_byte_offset);
++  header.payload_byte_offset = uint32_t(payload_byte_offset);
++
++  memcpy(blob.data(), &header, sizeof(header));
++  memcpy(blob.data() + offsets_byte_offset, offsets.data(), offsets.size() * sizeof(uint32_t));
++  if (!payload.empty()) {
++    memcpy(blob.data() + payload_byte_offset, payload.data(), payload.size() * sizeof(uint32_t));
++  }
++
++  return true;
++}
++
++bool VBTImageLoader::load_metadata(ImageMetaData &metadata,
++                                   const ImageLoaderParams & /*params*/,
++                                   Progress & /*progress*/)
++{
++  string error;
++  if (!load_vbt_blob(error)) {
++    LOG_ERROR << error;
++    return false;
++  }
++
++  const KernelVBTHeader *header = reinterpret_cast<const KernelVBTHeader *>(blob.data());
++
++  metadata.channels = 1;
++  metadata.width = int64_t(blob.size());
++  metadata.height = 0;
++  metadata.type = IMAGE_DATA_TYPE_VBT_DENSITY;
++  metadata.nanovdb_byte_size = int64_t(blob.size());
++  metadata.colorspace = u_colorspace_data;
++  metadata.use_transform_3d = true;
++
++  const float sx = float(std::max(header->dim_x, 1u) - 1u);
++  const float sy = float(std::max(header->dim_y, 1u) - 1u);
++  const float sz = float(std::max(header->dim_z, 1u) - 1u);
++  metadata.transform_3d = transform_scale(make_float3(sx, sy, sz));
++
++  return true;
++}
++
++bool VBTImageLoader::load_pixels(const ImageMetaData &metadata, void *pixels)
++{
++  if (metadata.type != IMAGE_DATA_TYPE_VBT_DENSITY || blob.empty()) {
++    return false;
++  }
++  memcpy(pixels, blob.data(), blob.size());
++  return true;
++}
++
++string VBTImageLoader::name() const
++{
++  return filepath;
++}
++
++bool VBTImageLoader::equals(const ImageLoader &other) const
++{
++  const VBTImageLoader *other_loader = dynamic_cast<const VBTImageLoader *>(&other);
++  return other_loader && filepath == other_loader->filepath &&
++         frame_index == other_loader->frame_index;
++}
++
++void VBTImageLoader::cleanup()
++{
++  blob.free_memory();
++}
++
++CCL_NAMESPACE_END

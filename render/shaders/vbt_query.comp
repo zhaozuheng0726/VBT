@@ -1,0 +1,362 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct QueryResult {
+    uint leafIndex;
+    uint packedHeader;
+    uint mode;
+    float value;
+};
+
+struct Query4D {
+    uint x;
+    uint y;
+    uint z;
+    uint t;
+};
+
+layout(std430, binding = 0) readonly buffer QueryBuffer {
+    Query4D queries[];
+};
+
+layout(std430, binding = 1) writeonly buffer ResultBuffer {
+    QueryResult results[];
+};
+
+layout(std430, binding = 2) readonly buffer CoarseScaleBuffer {
+    float coarseScales[];
+};
+
+layout(std430, binding = 3) readonly buffer OffsetBuffer {
+    uint offsets[];
+};
+
+layout(std430, binding = 4) readonly buffer PayloadBuffer {
+    uint payload[];
+};
+
+layout(push_constant) uniform QueryPushConstants {
+    uint dimX;
+    uint dimY;
+    uint dimZ;
+    uint frames;
+    uint leafSize;
+    uint leafCountX;
+    uint leafCountY;
+    uint queryCount;
+    uint coarseAcScaleCount;
+} pc;
+
+const float PI_F = 3.14159265358979323846;
+
+uint payloadByte(uint byteOffset)
+{
+    const uint word = payload[byteOffset >> 2u];
+    const uint shift = (byteOffset & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+uint payloadU16(uint byteOffset)
+{
+    return payloadByte(byteOffset) | (payloadByte(byteOffset + 1u) << 8u);
+}
+
+int payloadI8(uint byteOffset)
+{
+    const uint u = payloadByte(byteOffset);
+    return (u < 128u) ? int(u) : int(u) - 256;
+}
+
+float payloadHalf(uint byteOffset)
+{
+    return unpackHalf2x16(payloadU16(byteOffset)).x;
+}
+
+float dctBasis(uint timeIndex, uint k)
+{
+    const float n = float(pc.frames);
+    const float alpha = (k == 0u) ? inversesqrt(n) : sqrt(2.0 / n);
+    return alpha * cos((PI_F / n) * (float(timeIndex) + 0.5) * float(k));
+}
+
+uint tierCapacityFromId(uint tierId)
+{
+    if (tierId == 0u) return 64u;
+    if (tierId == 1u) return 256u;
+    if (tierId == 2u) return 768u;
+    return 1024u;
+}
+
+float decodeCoarseControl(uint payloadByteBase, int keep, int controlIndex, uint t)
+{
+    const uint controlBase = payloadByteBase + 4u + uint(controlIndex * (keep + 1));
+    float sum = payloadHalf(controlBase) * dctBasis(t, 0u);
+    for (int k = 1; k < keep; ++k) {
+        float coeff = float(payloadI8(controlBase + 2u + uint(k - 1)));
+        if (uint(k - 1) < pc.coarseAcScaleCount) {
+            coeff *= coarseScales[k - 1];
+        } else {
+            coeff = 0.0;
+        }
+        sum += coeff * dctBasis(t, uint(k));
+    }
+    return sum;
+}
+
+float sampleCoarseAt(uint payloadByteBase, int keep, uint lx, uint ly, uint lz, uint t)
+{
+    const float fx = (float(lx) / 7.0) * 3.0;
+    const float fy = (float(ly) / 7.0) * 3.0;
+    const float fz = (float(lz) / 7.0) * 3.0;
+    const int x0 = clamp(int(floor(fx)), 0, 2);
+    const int y0 = clamp(int(floor(fy)), 0, 2);
+    const int z0 = clamp(int(floor(fz)), 0, 2);
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const int z1 = z0 + 1;
+    const float tx = fx - float(x0);
+    const float ty = fy - float(y0);
+    const float tz = fz - float(z0);
+
+    int idx000 = (z0 * 4 + y0) * 4 + x0;
+    int idx100 = (z0 * 4 + y0) * 4 + x1;
+    int idx010 = (z0 * 4 + y1) * 4 + x0;
+    int idx110 = (z0 * 4 + y1) * 4 + x1;
+    int idx001 = (z1 * 4 + y0) * 4 + x0;
+    int idx101 = (z1 * 4 + y0) * 4 + x1;
+    int idx011 = (z1 * 4 + y1) * 4 + x0;
+    int idx111 = (z1 * 4 + y1) * 4 + x1;
+
+    const float c00 = mix(decodeCoarseControl(payloadByteBase, keep, idx000, t),
+                          decodeCoarseControl(payloadByteBase, keep, idx100, t), tx);
+    const float c10 = mix(decodeCoarseControl(payloadByteBase, keep, idx010, t),
+                          decodeCoarseControl(payloadByteBase, keep, idx110, t), tx);
+    const float c01 = mix(decodeCoarseControl(payloadByteBase, keep, idx001, t),
+                          decodeCoarseControl(payloadByteBase, keep, idx101, t), tx);
+    const float c11 = mix(decodeCoarseControl(payloadByteBase, keep, idx011, t),
+                          decodeCoarseControl(payloadByteBase, keep, idx111, t), tx);
+    return mix(mix(c00, c10, ty), mix(c01, c11, ty), tz);
+}
+
+float decodeBfp(uint q, float scale, uint bits)
+{
+    if (bits == 0u) return 0.0;
+    const uint levels = (1u << bits) - 1u;
+    const float norm = (float(q) / float(levels)) * 2.0 - 1.0;
+    return norm * scale;
+}
+
+float readDenseQuantValue(uint dataBase, uint frameByteStride, uint denseBits, uint valuesPerFrame, uint localFrame, uint controlIndex)
+{
+    if (controlIndex >= valuesPerFrame || denseBits == 0u) return 0.0;
+    const uint bitOffset = controlIndex * denseBits;
+    const uint byteIndex = dataBase + localFrame * frameByteStride + (bitOffset >> 3u);
+    const uint shift = bitOffset & 7u;
+    uint packed = payloadByte(byteIndex) |
+                  (payloadByte(byteIndex + 1u) << 8u) |
+                  (payloadByte(byteIndex + 2u) << 16u) |
+                  (payloadByte(byteIndex + 3u) << 24u);
+    const uint mask = (1u << denseBits) - 1u;
+    return float((packed >> shift) & mask);
+}
+
+float decodeDenseResidual(uint payloadByteBase,
+                          int keep,
+                          uint denseResolution,
+                          uint denseBits,
+                          uint lx,
+                          uint ly,
+                          uint lz,
+                          uint t)
+{
+    const uint valuesPerFrame = denseResolution * denseResolution * denseResolution;
+    const uint frameByteStride = (valuesPerFrame * denseBits + 7u) >> 3u;
+    const uint scalesBase = payloadByteBase + 4u + uint(64 * (keep + 1));
+    const uint dataBase = scalesBase + pc.frames * 2u;
+    const float scale = payloadHalf(scalesBase + t * 2u);
+
+    const float fx = (float(lx) / 7.0) * float(denseResolution - 1u);
+    const float fy = (float(ly) / 7.0) * float(denseResolution - 1u);
+    const float fz = (float(lz) / 7.0) * float(denseResolution - 1u);
+    const int x0 = clamp(int(floor(fx)), 0, int(denseResolution) - 2);
+    const int y0 = clamp(int(floor(fy)), 0, int(denseResolution) - 2);
+    const int z0 = clamp(int(floor(fz)), 0, int(denseResolution) - 2);
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const int z1 = z0 + 1;
+    const float tx = fx - float(x0);
+    const float ty = fy - float(y0);
+    const float tz = fz - float(z0);
+
+    uint idx000 = uint((z0 * int(denseResolution) + y0) * int(denseResolution) + x0);
+    uint idx100 = uint((z0 * int(denseResolution) + y0) * int(denseResolution) + x1);
+    uint idx010 = uint((z0 * int(denseResolution) + y1) * int(denseResolution) + x0);
+    uint idx110 = uint((z0 * int(denseResolution) + y1) * int(denseResolution) + x1);
+    uint idx001 = uint((z1 * int(denseResolution) + y0) * int(denseResolution) + x0);
+    uint idx101 = uint((z1 * int(denseResolution) + y0) * int(denseResolution) + x1);
+    uint idx011 = uint((z1 * int(denseResolution) + y1) * int(denseResolution) + x0);
+    uint idx111 = uint((z1 * int(denseResolution) + y1) * int(denseResolution) + x1);
+
+    const float c00 = mix(decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx000)), scale, denseBits),
+                          decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx100)), scale, denseBits), tx);
+    const float c10 = mix(decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx010)), scale, denseBits),
+                          decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx110)), scale, denseBits), tx);
+    const float c01 = mix(decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx001)), scale, denseBits),
+                          decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx101)), scale, denseBits), tx);
+    const float c11 = mix(decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx011)), scale, denseBits),
+                          decodeBfp(uint(readDenseQuantValue(dataBase, frameByteStride, denseBits, valuesPerFrame, t, idx111)), scale, denseBits), tx);
+    return mix(mix(c00, c10, ty), mix(c01, c11, ty), tz);
+}
+
+float decodeDenseTemporalBasisResidual(uint payloadByteBase,
+                                       int keep,
+                                       uint denseResolution,
+                                       uint denseBits,
+                                       uint temporalKeep,
+                                       uint lx,
+                                       uint ly,
+                                       uint lz,
+                                       uint t)
+{
+    if (temporalKeep == 0u || denseBits == 0u) return 0.0;
+    const uint valuesPerBasis = denseResolution * denseResolution * denseResolution;
+    const uint basisByteStride = (valuesPerBasis * denseBits + 7u) >> 3u;
+    const uint scalesBase = payloadByteBase + 4u + uint(64 * (keep + 1));
+    const uint dataBase = scalesBase + temporalKeep * 2u;
+
+    const float fx = (float(lx) / 7.0) * float(denseResolution - 1u);
+    const float fy = (float(ly) / 7.0) * float(denseResolution - 1u);
+    const float fz = (float(lz) / 7.0) * float(denseResolution - 1u);
+    const int x0 = clamp(int(floor(fx)), 0, int(denseResolution) - 2);
+    const int y0 = clamp(int(floor(fy)), 0, int(denseResolution) - 2);
+    const int z0 = clamp(int(floor(fz)), 0, int(denseResolution) - 2);
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const int z1 = z0 + 1;
+    const float tx = fx - float(x0);
+    const float ty = fy - float(y0);
+    const float tz = fz - float(z0);
+
+    float residual = 0.0;
+    for (uint k = 0u; k < temporalKeep; ++k) {
+        const float scale = payloadHalf(scalesBase + k * 2u);
+        uint basisBase = dataBase + k * basisByteStride;
+        uint idx000 = uint((z0 * int(denseResolution) + y0) * int(denseResolution) + x0);
+        uint idx100 = uint((z0 * int(denseResolution) + y0) * int(denseResolution) + x1);
+        uint idx010 = uint((z0 * int(denseResolution) + y1) * int(denseResolution) + x0);
+        uint idx110 = uint((z0 * int(denseResolution) + y1) * int(denseResolution) + x1);
+        uint idx001 = uint((z1 * int(denseResolution) + y0) * int(denseResolution) + x0);
+        uint idx101 = uint((z1 * int(denseResolution) + y0) * int(denseResolution) + x1);
+        uint idx011 = uint((z1 * int(denseResolution) + y1) * int(denseResolution) + x0);
+        uint idx111 = uint((z1 * int(denseResolution) + y1) * int(denseResolution) + x1);
+
+        const float c00 = mix(decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx000)), scale, denseBits),
+                              decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx100)), scale, denseBits), tx);
+        const float c10 = mix(decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx010)), scale, denseBits),
+                              decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx110)), scale, denseBits), tx);
+        const float c01 = mix(decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx001)), scale, denseBits),
+                              decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx101)), scale, denseBits), tx);
+        const float c11 = mix(decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx011)), scale, denseBits),
+                              decodeBfp(uint(readDenseQuantValue(basisBase, basisByteStride, denseBits, valuesPerBasis, 0u, idx111)), scale, denseBits), tx);
+        residual += mix(mix(c00, c10, ty), mix(c01, c11, ty), tz) * dctBasis(t, k);
+    }
+    return residual;
+}
+
+float decodeSparseResidual(uint payloadByteBase,
+                           uint packedHeader,
+                           int coarseKeep,
+                           uint localIndexValue,
+                           uint t)
+{
+    const uint eventCount = (packedHeader >> 16u) & 0x0FFFu;
+    if (eventCount == 0u) return 0.0;
+    const uint tierId = (packedHeader >> 8u) & 0x3u;
+    const uint tierCapacity = tierCapacityFromId(tierId);
+    const uint framesPerBin = ((packedHeader >> 10u) & 0xFu) + 1u;
+    const uint sparseBase = payloadByteBase + 4u + uint(64 * (coarseKeep + 1));
+    const float eventScale = uintBitsToFloat(payload[sparseBase >> 2u]);
+    if (!(eventScale > 0.0)) return 0.0;
+
+    const uint maskWord = payload[(sparseBase + 4u + ((localIndexValue >> 5u) * 4u)) >> 2u];
+    const uint maskBit = 1u << (localIndexValue & 31u);
+    if ((maskWord & maskBit) == 0u) return 0.0;
+
+    const uint binIdx = min(15u, t / max(1u, framesPerBin));
+    const uint localTime = t - binIdx * max(1u, framesPerBin);
+    const uint binsBase = sparseBase + 4u + 64u;
+    const uint start = payloadU16(binsBase + binIdx * 2u);
+    const uint end = (binIdx + 1u < 16u) ? payloadU16(binsBase + (binIdx + 1u) * 2u) : eventCount;
+    if (start >= end) return 0.0;
+
+    const uint targetKey = ((localTime & 0xFu) << 9u) | (localIndexValue & 0x1FFu);
+    const uint coordsBase = binsBase + 32u;
+    const uint residualBase = coordsBase + tierCapacity * 2u;
+    int left = int(start);
+    int right = int(end) - 1;
+    while (left <= right) {
+        const int mid = (left + right) >> 1;
+        const uint key = payloadU16(coordsBase + uint(mid) * 2u);
+        if (key == targetKey) {
+            const uint byte = payloadByte(residualBase + uint(mid >> 1));
+            const uint nibble = ((mid & 1) == 0) ? (byte & 0x0Fu) : ((byte >> 4u) & 0x0Fu);
+            int q = int(nibble);
+            if ((q & 0x8) != 0) q -= 16;
+            return float(q) * eventScale;
+        }
+        if (key < targetKey) left = mid + 1;
+        else right = mid - 1;
+    }
+    return 0.0;
+}
+
+void main()
+{
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.queryCount) {
+        return;
+    }
+
+    const Query4D q = queries[gid];
+    const uint bx = min(pc.leafCountX - 1u, q.x / pc.leafSize);
+    const uint by = min(pc.leafCountY - 1u, q.y / pc.leafSize);
+    const uint leafCountZ = (pc.dimZ + pc.leafSize - 1u) / pc.leafSize;
+    const uint bz = min(leafCountZ - 1u, q.z / pc.leafSize);
+    const uint leafIndex = (bz * pc.leafCountY + by) * pc.leafCountX + bx;
+    const uint wordOffset = offsets[leafIndex];
+    const uint packedHeader = payload[wordOffset];
+    const uint payloadByteBase = wordOffset * 4u;
+    const uint mode = packedHeader & 0x3u;
+    const uint denseSubtype = (packedHeader >> 12u) & 0x7u;
+    const uint denseTemporalKeep = ((packedHeader >> 15u) & 0xFu) + 1u;
+
+    const uint lx = q.x % pc.leafSize;
+    const uint ly = q.y % pc.leafSize;
+    const uint lz = q.z % pc.leafSize;
+    const uint localIndexValue = (lz * pc.leafSize + ly) * pc.leafSize + lx;
+
+    const int coarseKeep = int(((packedHeader >> 2u) & 0x3Fu) + 1u);
+    float value = sampleCoarseAt(payloadByteBase, coarseKeep, lx, ly, lz, q.t);
+
+    if (mode == 1u) {
+        value += decodeSparseResidual(payloadByteBase, packedHeader, coarseKeep, localIndexValue, q.t);
+    } else if (mode == 2u) {
+        const uint denseBits = (packedHeader >> 8u) & 0xFu;
+        value += (denseSubtype == 1u)
+            ? decodeDenseTemporalBasisResidual(payloadByteBase, coarseKeep, 3u, denseBits, denseTemporalKeep, lx, ly, lz, q.t)
+            : decodeDenseResidual(payloadByteBase, coarseKeep, 3u, denseBits, lx, ly, lz, q.t);
+    } else if (mode == 3u) {
+        const uint denseBits = (packedHeader >> 8u) & 0xFu;
+        value += (denseSubtype == 1u)
+            ? decodeDenseTemporalBasisResidual(payloadByteBase, coarseKeep, 4u, denseBits, denseTemporalKeep, lx, ly, lz, q.t)
+            : decodeDenseResidual(payloadByteBase, coarseKeep, 4u, denseBits, lx, ly, lz, q.t);
+    }
+
+    QueryResult outResult;
+    outResult.leafIndex = leafIndex;
+    outResult.packedHeader = packedHeader;
+    outResult.mode = mode;
+    outResult.value = value;
+    results[gid] = outResult;
+}
