@@ -1,0 +1,344 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct SmokeRayPacked {
+    vec4 originTmin;
+    vec4 dirTmax;
+};
+
+struct VbtSampleResult {
+    vec4 primary;
+    vec4 auxiliary;
+};
+
+layout(std430, binding = 0) readonly buffer ResultBuffer {
+    VbtSampleResult primaryResults[];
+};
+
+layout(std430, binding = 1) readonly buffer FlameResultBuffer {
+    VbtSampleResult flameResults[];
+};
+
+layout(std430, binding = 2) readonly buffer TemperatureResultBuffer {
+    VbtSampleResult temperatureResults[];
+};
+
+layout(rgba16f, binding = 3) uniform writeonly image2D outputImage;
+
+layout(std430, binding = 4) readonly buffer RayBuffer {
+    SmokeRayPacked rays[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint imageWidth;
+    uint imageHeight;
+    float densityScale;
+    float densityThreshold;
+    float densityGamma;
+    float exposure;
+    uint physicalMode;
+    uint padding1;
+    vec4 smokeColor;
+    vec4 backgroundColor;
+    float sampleDistance;
+    uint stepCount;
+    float flameStrength;
+    float flameThreshold;
+    uint hasFlames;
+    float temperatureMin;
+    float temperatureMax;
+    uint hasTemperature;
+    uint renderMode;
+    float surfaceRoughness;
+    float surfaceMetallic;
+    float surfaceOpacity;
+    vec4 surfaceColor;
+} pc;
+
+vec3 toneMap(vec3 color)
+{
+    color *= exp2(pc.exposure);
+    if (pc.renderMode == 0u && pc.physicalMode != 0u) {
+        color = (color * (2.51 * color + vec3(0.03))) /
+                (color * (2.43 * color + vec3(0.59)) + vec3(0.14));
+        return pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2));
+    }
+    color = color / (vec3(1.0) + color);
+    return pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+float depthBin(VbtSampleResult result, int index)
+{
+    return index < 4 ? result.primary[index] : result.auxiliary[index - 4];
+}
+
+vec3 fireRamp(float heat)
+{
+    float h = clamp(heat, 0.0, 1.0);
+    if (h < 0.12) return mix(vec3(0.35, 0.005, 0.0), vec3(1.0, 0.03, 0.0), h / 0.12);
+    if (h < 0.35) return mix(vec3(1.0, 0.03, 0.0), vec3(1.0, 0.22, 0.005), (h - 0.12) / 0.23);
+    if (h < 0.62) return mix(vec3(1.0, 0.22, 0.005), vec3(1.0, 0.48, 0.02), (h - 0.35) / 0.27);
+    return mix(vec3(1.0, 0.48, 0.02), vec3(1.0, 0.82, 0.28), (h - 0.62) / 0.38);
+}
+
+vec3 blackbodyColor(float kelvin)
+{
+    float temperature = clamp(kelvin, 1000.0, 12000.0) / 100.0;
+    float red = temperature <= 66.0
+                    ? 1.0
+                    : clamp(1.2929362 * pow(temperature - 60.0, -0.13320476), 0.0, 1.0);
+    float green = temperature <= 66.0
+                      ? clamp(0.39008158 * log(temperature) - 0.63184144, 0.0, 1.0)
+                      : clamp(1.1298909 * pow(temperature - 60.0, -0.07551485), 0.0, 1.0);
+    float blue = temperature >= 66.0
+                     ? 1.0
+                     : (temperature <= 19.0
+                            ? 0.0
+                            : clamp(0.5432068 * log(temperature - 10.0) - 1.1962541, 0.0, 1.0));
+    return vec3(red, green, blue);
+}
+
+vec3 physicalFire(VbtSampleResult densityResult,
+                  VbtSampleResult flameResult,
+                  VbtSampleResult temperatureResult,
+                  SmokeRayPacked ray)
+{
+    const int binCount = 8;
+    float samplesPerBin = max(float(pc.stepCount) / float(binCount), 1.0);
+    float segmentLength = max(ray.dirTmax.w, 0.0) / float(binCount);
+    float densities[binCount];
+    float flameEmission[binCount];
+    vec3 flameColors[binCount];
+
+    for (int bin = 0; bin < binCount; ++bin) {
+        float meanDensity = depthBin(densityResult, bin) / samplesPerBin;
+        densities[bin] = pow(max(meanDensity - pc.densityThreshold, 0.0),
+                             max(pc.densityGamma, 0.01));
+        float flameSum = pc.hasFlames != 0u ? max(depthBin(flameResult, bin), 0.0) : 0.0;
+        float flame = max(flameSum / samplesPerBin - pc.flameThreshold, 0.0);
+        float heat = clamp(flame * 0.18, 0.0, 1.0);
+        float effectiveTemperature = mix(pc.temperatureMin, pc.temperatureMax, heat);
+        if (pc.hasTemperature != 0u && flameSum > 1e-5) {
+            effectiveTemperature = depthBin(temperatureResult, bin) / samplesPerBin;
+            heat = clamp((effectiveTemperature - pc.temperatureMin) /
+                         max(pc.temperatureMax - pc.temperatureMin, 1.0), 0.0, 1.0);
+        }
+        vec3 rampColor = fireRamp(heat);
+        vec3 thermalColor = blackbodyColor(effectiveTemperature);
+        flameColors[bin] = mix(rampColor, thermalColor, clamp(pc.surfaceMetallic, 0.0, 1.0)) *
+                           max(pc.surfaceColor.rgb, vec3(0.02));
+        flameEmission[bin] = 1.0 - exp(-flame * max(pc.flameStrength, 0.0) *
+                                       max(segmentLength, 1e-4) * 0.12);
+    }
+
+    vec3 direction = normalize(ray.dirTmax.xyz);
+    vec3 keyDirection = normalize(vec3(-0.55, 0.72, 0.42));
+    float anisotropy = clamp(pc.sampleDistance, -0.85, 0.85);
+    float cosine = dot(-direction, keyDirection);
+    float phaseDenominator = max(1.0 + anisotropy * anisotropy -
+                                 2.0 * anisotropy * cosine, 0.05);
+    float phase = (1.0 - anisotropy * anisotropy) /
+                  pow(phaseDenominator, 1.5);
+    float scattering = max(pc.surfaceRoughness, 0.0) * (0.12 + 0.16 * phase);
+    float glowStrength = max(pc.surfaceOpacity, 0.0);
+
+    vec3 radiance = vec3(0.0);
+    float transmittance = 1.0;
+    for (int bin = 0; bin < binCount; ++bin) {
+        float opticalDepth = densities[bin] * max(pc.densityScale, 0.0) * segmentLength;
+        float segmentTransmittance = exp(-opticalDepth);
+        float smokeAlpha = 1.0 - segmentTransmittance;
+
+        vec3 neighboringFire = vec3(0.0);
+        for (int lightBin = 0; lightBin < binCount; ++lightBin) {
+            float weight = exp(-abs(float(lightBin - bin)) * 1.15);
+            neighboringFire += flameColors[lightBin] * flameEmission[lightBin] * weight;
+        }
+        vec3 smokeLighting = pc.smokeColor.rgb * (0.045 + scattering) +
+                             neighboringFire * glowStrength * 0.16;
+        radiance += transmittance * smokeAlpha * smokeLighting;
+        radiance += transmittance * flameColors[bin] * flameEmission[bin] *
+                    (1.15 + glowStrength * 0.85);
+        transmittance *= segmentTransmittance;
+        if (transmittance < 0.002) break;
+    }
+    return radiance + pc.backgroundColor.rgb * transmittance;
+}
+
+vec3 studioEnvironment(vec3 direction)
+{
+    vec3 d = normalize(direction);
+    vec3 up = pc.padding1 == 2u ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    float sky = clamp(dot(d, up) * 0.5 + 0.5, 0.0, 1.0);
+    vec3 horizon = pc.backgroundColor.rgb * 1.45 + vec3(0.08, 0.09, 0.10);
+    vec3 zenith = pc.backgroundColor.rgb * 0.55 + vec3(0.12, 0.16, 0.21);
+    vec3 environment = mix(horizon, zenith, pow(sky, 0.7));
+    vec3 keyDirection = normalize(pc.padding1 == 2u
+                                      ? vec3(-0.55, 0.42, 0.72)
+                                      : vec3(-0.55, 0.72, 0.42));
+    float softbox = pow(max(dot(d, keyDirection), 0.0), 96.0);
+    float rim = pow(max(dot(d, normalize(vec3(0.62, 0.38, -0.68))), 0.0), 180.0);
+    return (environment + vec3(2.8, 2.65, 2.45) * softbox + vec3(0.8, 1.05, 1.25) * rim) *
+           pc.sampleDistance;
+}
+
+bool intersectFloor(vec3 origin, vec3 direction, out vec3 point)
+{
+    float originUp = pc.padding1 == 2u ? origin.z : origin.y;
+    float directionUp = pc.padding1 == 2u ? direction.z : direction.y;
+    if (directionUp >= -1e-5) return false;
+    float t = (pc.densityGamma - originUp) / directionUp;
+    if (t <= 0.0) return false;
+    point = origin + direction * t;
+    return true;
+}
+
+vec3 studioFloor(vec3 point, vec3 viewDirection, float shadow)
+{
+    float secondFloorAxis = pc.padding1 == 2u ? point.y : point.z;
+    float broadPattern = 0.5 + 0.5 * sin(point.x * 0.025) * sin(secondFloorAxis * 0.025);
+    vec3 base = mix(vec3(0.25, 0.28, 0.32), vec3(0.34, 0.37, 0.41), broadPattern * 0.18);
+    vec3 up = pc.padding1 == 2u ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 reflection = studioEnvironment(reflect(viewDirection, up));
+    float darkening = 1.0 - clamp(pc.flameStrength, 0.0, 1.0) * shadow * 0.72;
+    return (base * 0.72 + reflection * 0.22) * darkening;
+}
+
+vec3 studioScene(vec3 origin, vec3 direction)
+{
+    vec3 floorPoint;
+    if (intersectFloor(origin, direction, floorPoint)) return studioFloor(floorPoint, direction, 0.0);
+    return studioEnvironment(direction);
+}
+
+vec3 physicalWater(VbtSampleResult result, SmokeRayPacked ray)
+{
+    vec3 direction = normalize(ray.dirTmax.xyz);
+    vec3 normal = normalize(result.primary.xyz);
+    if (dot(normal, direction) > 0.0) normal = -normal;
+    vec3 hitPoint = ray.originTmin.xyz + direction * result.primary.w;
+    float viewCosine = clamp(dot(normal, -direction), 0.0, 1.0);
+    float ior = clamp(pc.densityScale, 1.01, 2.5);
+    float r0 = (1.0 - ior) / (1.0 + ior);
+    r0 *= r0;
+    float fresnel = r0 + (1.0 - r0) * pow(1.0 - viewCosine, 5.0);
+    fresnel = clamp(fresnel * max(pc.flameThreshold, 0.0), 0.0, 1.0);
+
+    vec3 reflectedDirection = reflect(direction, normal);
+    vec3 refractedDirection = refract(direction, normal, 1.0 / ior);
+    if (dot(refractedDirection, refractedDirection) < 1e-6) refractedDirection = reflectedDirection;
+    vec3 reflected = studioScene(hitPoint + normal * 0.5, reflectedDirection);
+    vec3 refracted = studioScene(hitPoint - normal * 0.5, refractedDirection);
+
+    float thickness = max(result.auxiliary.x, 0.0);
+    vec3 absorptionCoefficient = max(vec3(0.0), vec3(1.0) - pc.smokeColor.rgb) *
+                                 max(pc.densityThreshold, 0.0);
+    refracted *= exp(-absorptionCoefficient * thickness);
+    refracted *= mix(vec3(1.0), pc.surfaceColor.rgb, 0.34);
+
+    float roughness = clamp(pc.surfaceRoughness, 0.0, 1.0);
+    reflected = mix(reflected, studioEnvironment(normal), roughness * roughness * 0.55);
+    vec3 keyDirection = normalize(pc.padding1 == 2u
+                                      ? vec3(-0.55, 0.42, 0.72)
+                                      : vec3(-0.55, 0.72, 0.42));
+    vec3 halfVector = normalize(keyDirection - direction);
+    float specular = pow(max(dot(normal, halfVector), 0.0), mix(420.0, 12.0, roughness));
+    float key = max(dot(normal, keyDirection), 0.0);
+    vec3 body = pc.surfaceColor.rgb * (0.045 + 0.075 * key);
+    vec3 color = mix(refracted, reflected, fresnel);
+    color *= mix(0.72, 1.0, fresnel);
+    color += body + vec3(3.2, 3.0, 2.75) * specular;
+    return mix(studioEnvironment(direction), color, clamp(pc.surfaceOpacity, 0.0, 1.0));
+}
+
+void main()
+{
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= pc.imageWidth || pixel.y >= pc.imageHeight) return;
+
+    uint index = pixel.y * pc.imageWidth + pixel.x;
+    if (pc.renderMode == 1u) {
+        VbtSampleResult result = primaryResults[index];
+        SmokeRayPacked ray = rays[index];
+        vec4 surface = result.primary;
+        vec3 color;
+        if (pc.physicalMode != 0u) {
+            if (surface.w >= 0.0) {
+                color = physicalWater(result, ray);
+            }
+            else if (result.auxiliary.y > 0.5) {
+                float originUp = pc.padding1 == 2u ? ray.originTmin.z : ray.originTmin.y;
+                float directionUp = pc.padding1 == 2u ? ray.dirTmax.z : ray.dirTmax.y;
+                float floorT = (pc.densityGamma - originUp) / directionUp;
+                vec3 floorPoint = ray.originTmin.xyz + ray.dirTmax.xyz * floorT;
+                color = studioFloor(floorPoint, ray.dirTmax.xyz, result.auxiliary.z);
+            }
+            else {
+                color = studioEnvironment(ray.dirTmax.xyz);
+            }
+        }
+        else {
+            color = pc.backgroundColor.rgb;
+        }
+        if (pc.physicalMode == 0u && surface.w >= 0.0) {
+            vec3 normal = normalize(surface.xyz);
+            float viewCosine = result.auxiliary.w;
+            vec3 keyDirection = normalize(vec3(-0.55, 0.72, 0.42));
+            vec3 fillDirection = normalize(vec3(0.64, 0.18, -0.52));
+            float key = max(dot(normal, keyDirection), 0.0);
+            float fill = max(dot(normal, fillDirection), 0.0);
+            float rim = pow(clamp(1.0 - viewCosine, 0.0, 1.0), 2.5);
+            float fresnel = 0.02 + 0.98 * pow(clamp(1.0 - viewCosine, 0.0, 1.0), 5.0);
+            float shininess = mix(180.0, 10.0, clamp(pc.surfaceRoughness, 0.0, 1.0));
+            float specular = pow(max(dot(normal, normalize(keyDirection + vec3(0.0, 0.0, 1.0))), 0.0),
+                                 shininess);
+            vec3 diffuse = pc.surfaceColor.rgb * (0.2 + 0.78 * key + 0.24 * fill);
+            vec3 specularColor = mix(vec3(1.0), pc.surfaceColor.rgb, clamp(pc.surfaceMetallic, 0.0, 1.0));
+            vec3 lit = diffuse + specularColor * (specular * (1.2 - pc.surfaceRoughness) + fresnel * 0.42) +
+                       vec3(0.18, 0.32, 0.40) * rim;
+            color = mix(pc.backgroundColor.rgb, lit, clamp(pc.surfaceOpacity, 0.0, 1.0));
+        }
+        imageStore(outputImage, ivec2(pixel), vec4(toneMap(color), 1.0));
+        return;
+    }
+
+    float integratedDensity = primaryResults[index].primary.x;
+    if (pc.physicalMode != 0u) {
+        vec3 color = physicalFire(primaryResults[index],
+                                  flameResults[index],
+                                  temperatureResults[index],
+                                  rays[index]);
+        imageStore(outputImage, ivec2(pixel), vec4(toneMap(color), 1.0));
+        return;
+    }
+    float meanDensity = integratedDensity / max(float(pc.stepCount), 1.0);
+    float density = pow(max(meanDensity - pc.densityThreshold, 0.0), max(pc.densityGamma, 0.01));
+    float opticalDepth = density * pc.densityScale * pc.sampleDistance;
+    float alpha = 1.0 - exp(-opticalDepth);
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.imageWidth, pc.imageHeight);
+    float keyLight = mix(0.72, 1.18, clamp(1.0 - uv.y, 0.0, 1.0));
+    vec3 smoke = pc.smokeColor.rgb * keyLight;
+    vec3 color = mix(pc.backgroundColor.rgb, smoke, alpha);
+    if (pc.hasFlames != 0u) {
+        float integratedFlames = flameResults[index].primary.x;
+        float meanFlame = integratedFlames / max(float(pc.stepCount), 1.0);
+        float flame = max(meanFlame - pc.flameThreshold, 0.0) * pc.flameStrength;
+        float emission = 1.0 - exp(-flame * 2.4);
+        float heat = clamp(flame * 0.45, 0.0, 1.0);
+        if (pc.hasTemperature != 0u) {
+            float effectiveTemperature = temperatureResults[index].primary.x /
+                                         max(integratedFlames, 1.0);
+            heat = clamp((effectiveTemperature - pc.temperatureMin) /
+                         max(pc.temperatureMax - pc.temperatureMin, 1.0), 0.0, 1.0);
+        }
+        vec3 outerFire = vec3(1.0, 0.035, 0.002);
+        vec3 middleFire = vec3(1.0, 0.34, 0.015);
+        vec3 coreFire = vec3(1.0, 0.93, 0.52);
+        vec3 fireColor = heat < 0.5 ? mix(outerFire, middleFire, heat * 2.0)
+                                    : mix(middleFire, coreFire, (heat - 0.5) * 2.0);
+        color = mix(color, fireColor * (1.0 + flame * 0.35), emission);
+    }
+    imageStore(outputImage, ivec2(pixel), vec4(toneMap(color), 1.0));
+}

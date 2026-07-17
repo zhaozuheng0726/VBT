@@ -1,24 +1,19 @@
 # VBT Blender Bridge
 
-Minimal Blender addon for loading one `.vbtp` frame through an OpenVDB proxy.
+Blender addon for loading one `.vbtp` frame through an OpenVDB proxy, with an
+optional direct compressed preview.
 
-This path does not modify Blender or Cycles. It invokes:
+This is the compatibility path. It does not modify Blender or Cycles. It invokes:
 
 - `render_temporal_vbt_to_vdb.exe` for proxy import
 - `render_temporal_vbt_direct_preview.exe` for direct compressed preview
 
-The addon resolves helper binaries in this order:
+The addon resolves helpers from `VBT_TOOLS_DIR`, the repository `build/`
+directory, the legacy `3D/vdb_tools/build/` directory, and then `PATH`.
 
-- `VBT_TOOLS_DIR`
-- repo-local `build/`
-- legacy workspace layout
-- `PATH`
-
-Useful environment variables:
-
-- `VBT_PROJECT_ROOT`: repository root
+- `VBT_PROJECT_ROOT`: VBT repository root
 - `VBT_TOOLS_DIR`: directory containing the helper executables
-- `VBT_METADATA_DIR`: optional fallback directory for `*.metadata.json`
+- `VBT_METADATA_DIR`: optional directory for fallback `*.metadata.json` lookup
 
 Current scope:
 
@@ -34,7 +29,13 @@ Current scope:
 
 1. Install `vbt_blender_bridge.py` from Blender's Add-ons panel.
 2. Enable `VBT Blender Bridge`.
-3. If needed, build the helper binaries from `../blender_bridge_tools/`.
+3. Build the helpers when needed:
+
+```powershell
+cmake -S . -B build -DVBT_BUILD_BLENDER_BRIDGE_TOOLS=ON
+cmake --build build --config Release --target render_temporal_vbt_direct_preview
+```
+
 4. Use `File > Import > VBT Frame (.vbtp)`.
 5. Set:
    - `Metadata JSON`

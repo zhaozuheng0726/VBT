@@ -1,0 +1,99 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct SmokeRayPacked {
+    vec4 originTmin;
+    vec4 dirTmax;
+};
+
+layout(std430, binding = 0) readonly buffer RayBuffer {
+    SmokeRayPacked rays[];
+};
+
+layout(std430, binding = 1) readonly buffer DenseBuffer {
+    float denseValues[];
+};
+
+layout(std430, binding = 2) writeonly buffer ResultBuffer {
+    float results[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint dimX;
+    uint dimY;
+    uint dimZ;
+    uint imageWidth;
+    uint imageHeight;
+    uint rayCount;
+    uint stepCount;
+    uint slotStrideFloats;
+    uint activeSlot;
+    float bboxMinX;
+    float bboxMinY;
+    float bboxMinZ;
+    float densityScale;
+} pc;
+
+uint denseIndex(uint x, uint y, uint z)
+{
+    return pc.activeSlot * pc.slotStrideFloats + (z * pc.dimY + y) * pc.dimX + x;
+}
+
+float sampleDenseTrilinear(vec3 pWorld)
+{
+    vec3 p = pWorld - vec3(pc.bboxMinX, pc.bboxMinY, pc.bboxMinZ);
+    vec3 maxP = vec3(float(pc.dimX - 1u), float(pc.dimY - 1u), float(pc.dimZ - 1u));
+    if (any(lessThan(p, vec3(0.0))) || any(greaterThan(p, maxP))) {
+        return 0.0;
+    }
+
+    vec3 baseF = floor(p);
+    uvec3 c0 = uvec3(baseF);
+    uvec3 c1 = min(c0 + uvec3(1u), uvec3(pc.dimX - 1u, pc.dimY - 1u, pc.dimZ - 1u));
+    vec3 w = p - baseF;
+
+    float v000 = denseValues[denseIndex(c0.x, c0.y, c0.z)];
+    float v100 = denseValues[denseIndex(c1.x, c0.y, c0.z)];
+    float v010 = denseValues[denseIndex(c0.x, c1.y, c0.z)];
+    float v110 = denseValues[denseIndex(c1.x, c1.y, c0.z)];
+    float v001 = denseValues[denseIndex(c0.x, c0.y, c1.z)];
+    float v101 = denseValues[denseIndex(c1.x, c0.y, c1.z)];
+    float v011 = denseValues[denseIndex(c0.x, c1.y, c1.z)];
+    float v111 = denseValues[denseIndex(c1.x, c1.y, c1.z)];
+
+    float x00 = mix(v000, v100, w.x);
+    float x10 = mix(v010, v110, w.x);
+    float x01 = mix(v001, v101, w.x);
+    float x11 = mix(v011, v111, w.x);
+    float y0 = mix(x00, x10, w.y);
+    float y1 = mix(x01, x11, w.y);
+    return mix(y0, y1, w.z);
+}
+
+void main()
+{
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    if (px >= pc.imageWidth || py >= pc.imageHeight) {
+        return;
+    }
+
+    uint rayIndex = py * pc.imageWidth + px;
+    if (rayIndex >= pc.rayCount) {
+        return;
+    }
+
+    SmokeRayPacked ray = rays[rayIndex];
+    float dt = ray.dirTmax.w / max(float(pc.stepCount), 1.0);
+    float t = ray.originTmin.w + 0.5 * dt;
+    float accum = 0.0;
+
+    for (uint i = 0u; i < pc.stepCount; ++i) {
+        vec3 p = ray.originTmin.xyz + ray.dirTmax.xyz * t;
+        accum += sampleDenseTrilinear(p) * pc.densityScale;
+        t += dt;
+    }
+
+    results[rayIndex] = accum;
+}

@@ -1,0 +1,51 @@
+{
+  "dataset_name": "channel",
+  "variable": "pressure",
+  "component": null,
+  "component_name": null,
+  "dimensions": [
+    256,
+    256,
+    256,
+    128
+  ],
+  "axis_order": [
+    "X",
+    "Y",
+    "Z",
+    "T"
+  ],
+  "time_is_fastest_dimension": true,
+  "data_type": "float32",
+  "file_name": "J6_channel_pressure_256x256x256_128f.raw",
+  "global_min": -0.053711071610450745,
+  "global_max": 0.01447563897818327,
+  "normalization": null,
+  "source_indexing": {
+    "api_is_1_based": true,
+    "requested_start_0_based": {
+      "x": 896,
+      "y": 128,
+      "z": 640,
+      "t": 0
+    },
+    "actual_api_ranges_inclusive": {
+      "x": [
+        897,
+        1152
+      ],
+      "y": [
+        129,
+        384
+      ],
+      "z": [
+        641,
+        896
+      ],
+      "t": [
+        1,
+        128
+      ]
+    }
+  }
+}

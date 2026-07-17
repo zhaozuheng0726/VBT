@@ -1,0 +1,8 @@
+/build/
+/build-*/
+/.vs/
+*.user
+*.suo
+*.VC.db
+/imgui.ini
+/vbtstudio_layout.ini

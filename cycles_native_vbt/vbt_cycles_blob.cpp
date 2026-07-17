@@ -50,8 +50,8 @@ bool pack_blob(const File &file, int frame_index, std::vector<uint8_t> &out_blob
     const size_t offsets_byte_offset = align_up4(sizeof(BlobHeader));
     const size_t payload_byte_offset = offsets_byte_offset + file.offsets_words.size() * sizeof(uint32_t);
     const size_t blob_bytes = payload_byte_offset + file.payload_words.size() * sizeof(uint32_t);
-    if (offsets_byte_offset > UINT32_MAX || payload_byte_offset > UINT32_MAX || blob_bytes > UINT32_MAX) {
-        error = "VBT blob exceeds 32-bit offset range for the current prototype.";
+    if (offsets_byte_offset > UINT32_MAX || payload_byte_offset > UINT32_MAX) {
+        error = "VBT blob section offset exceeds the 32-bit header range.";
         return false;
     }
 
@@ -98,8 +98,11 @@ bool blob_payload_view(const std::vector<uint8_t> &blob, vbt_cycles::PayloadView
         error = "Invalid VBT blob header.";
         return false;
     }
-    if (blob_header->offsets_byte_offset + blob_header->offsets_word_count * sizeof(uint32_t) > blob.size() ||
-        blob_header->payload_byte_offset + blob_header->payload_word_count * sizeof(uint32_t) > blob.size()) {
+    const size_t offsets_end = static_cast<size_t>(blob_header->offsets_byte_offset) +
+                               static_cast<size_t>(blob_header->offsets_word_count) * sizeof(uint32_t);
+    const size_t payload_end = static_cast<size_t>(blob_header->payload_byte_offset) +
+                              static_cast<size_t>(blob_header->payload_word_count) * sizeof(uint32_t);
+    if (offsets_end > blob.size() || payload_end > blob.size()) {
         error = "VBT blob offset ranges exceed blob size.";
         return false;
     }

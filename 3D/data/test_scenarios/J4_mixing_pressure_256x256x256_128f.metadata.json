@@ -1,0 +1,51 @@
+{
+  "dataset_name": "mixing",
+  "variable": "pressure",
+  "component": null,
+  "component_name": null,
+  "dimensions": [
+    256,
+    256,
+    256,
+    128
+  ],
+  "axis_order": [
+    "X",
+    "Y",
+    "Z",
+    "T"
+  ],
+  "time_is_fastest_dimension": true,
+  "data_type": "float32",
+  "file_name": "J4_mixing_pressure_256x256x256_128f.raw",
+  "global_min": -0.13217827677726746,
+  "global_max": 0.034868355840444565,
+  "normalization": null,
+  "source_indexing": {
+    "api_is_1_based": true,
+    "requested_start_0_based": {
+      "x": 384,
+      "y": 384,
+      "z": 384,
+      "t": 0
+    },
+    "actual_api_ranges_inclusive": {
+      "x": [
+        385,
+        640
+      ],
+      "y": [
+        385,
+        640
+      ],
+      "z": [
+        385,
+        640
+      ],
+      "t": [
+        1,
+        128
+      ]
+    }
+  }
+}

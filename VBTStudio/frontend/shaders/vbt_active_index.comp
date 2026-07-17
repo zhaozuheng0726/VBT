@@ -1,0 +1,58 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer OffsetBuffer {
+    uint offsetsWords[];
+};
+
+layout(std430, binding = 1) readonly buffer PayloadBuffer {
+    uint payloadWords[];
+};
+
+layout(std430, binding = 2) writeonly buffer MappingBuffer {
+    uint compactLeafIndices[];
+};
+
+layout(std430, binding = 3) buffer CounterBuffer {
+    uint activeLeafCount;
+};
+
+layout(push_constant) uniform PushConstants {
+    uint leafCount;
+} pc;
+
+shared uint groupPrefix[256];
+shared uint groupBase;
+
+void main()
+{
+    uint leafIndex = gl_GlobalInvocationID.x +
+                     gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint localIndex = gl_LocalInvocationID.x;
+    bool valid = leafIndex < pc.leafCount;
+    uint activeFlag = 0u;
+    if (valid) {
+        uint wordBegin = offsetsWords[leafIndex];
+        activeFlag = (payloadWords[wordBegin] & 0x3u) == 0u ? 0u : 1u;
+    }
+    groupPrefix[localIndex] = activeFlag;
+    barrier();
+
+    for (uint offset = 1u; offset < gl_WorkGroupSize.x; offset <<= 1u) {
+        uint addend = localIndex >= offset ? groupPrefix[localIndex - offset] : 0u;
+        barrier();
+        groupPrefix[localIndex] += addend;
+        barrier();
+    }
+    if (localIndex == gl_WorkGroupSize.x - 1u) {
+        groupBase = atomicAdd(activeLeafCount, groupPrefix[localIndex]);
+    }
+    barrier();
+
+    if (valid) {
+        compactLeafIndices[leafIndex] = activeFlag == 0u
+            ? 0xffffffffu
+            : groupBase + groupPrefix[localIndex] - 1u;
+    }
+}

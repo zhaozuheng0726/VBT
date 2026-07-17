@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <numeric>
+#include <optional>
 
 #ifdef VBT_USE_OPENMP
 #include <omp.h>
@@ -129,6 +130,10 @@ void writeReport(const std::filesystem::path& reportPath,
     out << "# VBT Spatial-First Hybrid Temporal Probe\n\n";
     out << "- input: `" << inputRaw.string() << "`\n";
     out << "- dimensions: `" << volume.meta.width << "x" << volume.meta.height << "x" << volume.meta.depth << " x " << volume.meta.frames << "`\n";
+    out << "- source raw layout: `"
+        << (volume.meta.rawStorageOrder == RawStorageOrder::TimeFastest ? "time-fastest" : "frame-major")
+        << "`\n";
+    out << "- internal raw layout: `frame-major [T][Z][Y][X]`\n";
     out << "- profile: `" << (options.profile.type == FieldType::GENERIC ? "generic" : options.profile.type == FieldType::DENSITY ? "density" : "sdf") << "`\n";
     out << "- DCT keep: `" << options.dctKeep << "`\n";
     out << "- event top-K: `" << options.eventTopK << "`\n";
@@ -508,6 +513,9 @@ int main(int argc, char** argv)
     bool warnResidualTopAlias = false;
     bool warnResidualKfDeprecated = false;
     bool warnResidualCellDeprecated = false;
+    std::optional<float> renderCutoffOverride;
+    std::optional<float> cutoffBandOverride;
+    std::optional<float> isoOverride;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
@@ -640,11 +648,11 @@ int main(int argc, char** argv)
             subset.sy = v[1];
             subset.sz = v[2];
         }
-        else if (arg == "--cutoff" && i + 1 < argc) options.profile.den.renderCutoff = std::stof(argv[++i]);
-        else if (arg == "--cutoff-band" && i + 1 < argc) options.profile.den.cutoffBand = std::stof(argv[++i]);
+        else if (arg == "--cutoff" && i + 1 < argc) renderCutoffOverride = std::stof(argv[++i]);
+        else if (arg == "--cutoff-band" && i + 1 < argc) cutoffBandOverride = std::stof(argv[++i]);
         else if (arg == "--eval-mask-cutoff" && i + 1 < argc) options.evalMaskCutoff = std::stof(argv[++i]);
         else if (arg == "--eval-mask-band" && i + 1 < argc) options.evalMaskBand = std::stof(argv[++i]);
-        else if (arg == "--iso" && i + 1 < argc) options.profile.sdf.iso = std::stof(argv[++i]);
+        else if (arg == "--iso" && i + 1 < argc) isoOverride = std::stof(argv[++i]);
         else if (arg == "--compare-temporal-baseline") options.compareTemporalBaseline = true;
         else if (arg == "--report" && i + 1 < argc) reportPath = argv[++i];
         else if (arg == "--help" || arg == "-h") {
@@ -676,6 +684,9 @@ int main(int argc, char** argv)
         std::cerr << "Unknown profile: " << profileName << "\n";
         return 3;
     }
+    if (renderCutoffOverride) options.profile.den.renderCutoff = *renderCutoffOverride;
+    if (cutoffBandOverride) options.profile.den.cutoffBand = *cutoffBandOverride;
+    if (isoOverride) options.profile.sdf.iso = *isoOverride;
 
     try {
 #ifdef VBT_USE_OPENMP
@@ -692,6 +703,17 @@ int main(int argc, char** argv)
         if (warnResidualCellDeprecated) {
             std::cerr << "[warn] --residual-cell-size is deprecated and ignored for event-based Mode 2.\n";
         }
+        if (options.profile.type == FieldType::DENSITY) {
+            if (subset.enabled) {
+                throw std::runtime_error("Density render-temporal mainline does not support --subset");
+            }
+            if (reportPath.empty()) {
+                reportPath = std::filesystem::path("reports") / (inputRaw.stem().string() + "_render_temporal_mainline.md");
+            }
+            std::filesystem::create_directories(reportPath.parent_path());
+            return runRenderTemporalMainline(inputRaw, metadataPath, reportPath, options);
+        }
+
         auto volume = loadRawVolume(inputRaw, metadataPath);
         if (subset.enabled) {
             if (subset.sx <= 0 || subset.sy <= 0 || subset.sz <= 0) {
@@ -700,13 +722,6 @@ int main(int argc, char** argv)
             volume = cropRawVolume(volume, subset.x0, subset.y0, subset.z0, subset.sx, subset.sy, subset.sz);
         }
         RenderTemporalFirstProbeStats temporalProbeStats{};
-        if (options.profile.type == FieldType::DENSITY) {
-            if (reportPath.empty()) {
-                reportPath = std::filesystem::path("reports") / (inputRaw.stem().string() + "_render_temporal_mainline.md");
-            }
-            std::filesystem::create_directories(reportPath.parent_path());
-            return runRenderTemporalMainline(inputRaw, metadataPath, reportPath, options);
-        }
         if (options.renderTemporalFirstProbe) {
             volume = applyRenderTemporalFirstProbe(volume, options, &temporalProbeStats);
         }
@@ -718,13 +733,18 @@ int main(int argc, char** argv)
                 (reportPath.parent_path() / (inputRaw.stem().string() + "_residual_diagnostics")).string();
         }
         // Main execution is: load/crop -> encode whole volume -> evaluate ->
-        // optionally save compact VBTPACK2 payload -> emit markdown/csv reports.
+        // optionally save compact VBTPACK4 payload -> emit markdown/csv reports.
         SpatialFirstHybridEncoder encoder(options);
         const auto summary = encoder.run(volume);
 
         std::cout << "=== VBT Spatial-First Hybrid Temporal Probe ===\n";
         std::cout << "Input                 : " << inputRaw.string() << "\n";
         std::cout << "Dimensions            : " << volume.meta.width << "x" << volume.meta.height << "x" << volume.meta.depth << " x " << volume.meta.frames << "\n";
+        std::cout << "Source raw layout     : "
+                  << (volume.meta.rawStorageOrder == RawStorageOrder::TimeFastest
+                          ? "time-fastest"
+                          : "frame-major")
+                  << "\n";
         if (options.renderTemporalFirstProbe) {
             const double avgKf =
                 temporalProbeStats.voxelCount > 0

@@ -12,3 +12,7 @@ git apply native_cycles_vbt.patch
 ```
 
 The standalone code that this patch relies on remains in `../cycles_native_vbt/`.
+
+The patch treats NanoVDB and VBT payloads as resident linear buffers on CUDA,
+HIP, Metal, and oneAPI. Using a texture object for a VBT payload causes an
+illegal device address when the VBT sampler dereferences `KernelImageInfo.data`.

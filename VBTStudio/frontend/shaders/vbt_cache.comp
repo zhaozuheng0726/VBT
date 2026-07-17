@@ -1,0 +1,257 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer OffsetBuffer {
+    uint offsetsWords[];
+};
+
+layout(std430, binding = 1) readonly buffer PayloadBuffer {
+    uint payloadWords[];
+};
+
+layout(std430, binding = 2) writeonly buffer CacheBuffer {
+    float cachedControls[];
+};
+
+layout(std430, binding = 3) readonly buffer ActiveLeafMappingBuffer {
+    uint compactLeafIndices[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint frames;
+    uint leafCount;
+    int frameIndex;
+    uint padding;
+} pc;
+
+const uint MODE_EMPTY = 0u;
+const uint MODE_SHELL = 2u;
+const uint MODE_FINE6 = 3u;
+const uint TIME_BIN_COUNT = 8u;
+const uint COARSE_CACHE_COUNT = 64u;
+const uint FINE_CACHE_COUNT = 512u;
+const uint CACHE_STRIDE = COARSE_CACHE_COUNT + FINE_CACHE_COUNT;
+
+uint alignUp4(uint bytes)
+{
+    return (bytes + 3u) & ~3u;
+}
+
+uint readPayloadByte(uint baseWord, uint byteOffset)
+{
+    uint word = payloadWords[baseWord + (byteOffset >> 2u)];
+    uint shift = (byteOffset & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+uint readPayloadU16(uint baseWord, uint byteOffset)
+{
+    return readPayloadByte(baseWord, byteOffset) |
+           (readPayloadByte(baseWord, byteOffset + 1u) << 8u);
+}
+
+uint readPayloadU32(uint baseWord, uint byteOffset)
+{
+    return readPayloadByte(baseWord, byteOffset) |
+           (readPayloadByte(baseWord, byteOffset + 1u) << 8u) |
+           (readPayloadByte(baseWord, byteOffset + 2u) << 16u) |
+           (readPayloadByte(baseWord, byteOffset + 3u) << 24u);
+}
+
+float halfToFloat(uint h)
+{
+    uint sign = (h >> 15u) & 1u;
+    uint exponent = (h >> 10u) & 0x1Fu;
+    uint mantissa = h & 0x3FFu;
+    uint bits = 0u;
+    if (exponent == 0u) {
+        if (mantissa == 0u) {
+            bits = sign << 31u;
+        }
+        else {
+            int e = -14;
+            uint m = mantissa;
+            while ((m & 0x400u) == 0u) {
+                m <<= 1u;
+                --e;
+            }
+            m &= 0x3FFu;
+            bits = (sign << 31u) | (uint(e + 127) << 23u) | (m << 13u);
+        }
+    }
+    else if (exponent == 31u) {
+        bits = (sign << 31u) | 0x7F800000u | (mantissa << 13u);
+    }
+    else {
+        bits = (sign << 31u) | ((exponent + 112u) << 23u) | (mantissa << 13u);
+    }
+    return uintBitsToFloat(bits);
+}
+
+float readPackedKeyframeValue(uint baseWord,
+                              uint keyBase,
+                              uint codec,
+                              uint keyIndex,
+                              out uint keyFrame)
+{
+    if (codec == 1u) {
+        uint offset = keyBase + keyIndex * 8u;
+        keyFrame = readPayloadU16(baseWord, offset);
+        uint bits = readPayloadByte(baseWord, offset + 4u) |
+                    (readPayloadByte(baseWord, offset + 5u) << 8u) |
+                    (readPayloadByte(baseWord, offset + 6u) << 16u) |
+                    (readPayloadByte(baseWord, offset + 7u) << 24u);
+        return uintBitsToFloat(bits);
+    }
+    uint offset = keyBase + keyIndex * 3u;
+    keyFrame = readPayloadByte(baseWord, offset);
+    return halfToFloat(readPayloadU16(baseWord, offset + 1u));
+}
+
+float decodeTemporalControlValue(uint baseWord,
+                                 uint streamBase,
+                                 uint codec,
+                                 uint controlCount,
+                                 uint timeBinCount,
+                                 uint keyframeCount,
+                                 uint controlIndex)
+{
+    uint descriptorBytes = controlCount * 4u;
+    uint binIndexBytes = alignUp4(controlCount * timeBinCount);
+    uint keyBase = streamBase + descriptorBytes + binIndexBytes;
+    uint descOffset = streamBase + controlIndex * 4u;
+    uint keyStart = readPayloadU16(baseWord, descOffset);
+    uint keyCount = readPayloadByte(baseWord, descOffset + 2u);
+    uint reserved = readPayloadByte(baseWord, descOffset + 3u);
+    if (keyCount == 0u) return 0.0;
+    if (keyCount == 1u) {
+        uint onlyFrame;
+        return readPackedKeyframeValue(baseWord, keyBase, codec, keyStart, onlyFrame);
+    }
+
+    int clampedFrame = clamp(pc.frameIndex, 0, max(int(pc.frames) - 1, 0));
+    uint safeFrames = max(pc.frames, 1u);
+    int bin = int(min(timeBinCount - 1u,
+                      (uint(clampedFrame) * timeBinCount) / safeFrames));
+    uint binBase = streamBase + descriptorBytes + controlIndex * timeBinCount;
+    int beginLocal = clamp(int(readPayloadByte(baseWord, binBase + uint(bin))),
+                           0,
+                           int(keyCount) - 1);
+    int endLocal = int(keyCount);
+    for (int next = bin + 1; next < int(timeBinCount); ++next) {
+        int nextLocal = int(readPayloadByte(baseWord, binBase + uint(next)));
+        if (nextLocal > beginLocal) {
+            endLocal = min(nextLocal, int(keyCount));
+            break;
+        }
+    }
+    int maxBinKeys = reserved != 0u ? int(reserved) : 8;
+    endLocal = min(endLocal, beginLocal + max(1, maxBinKeys));
+
+    int previousLocal = beginLocal;
+    int currentLocal = beginLocal;
+    while (currentLocal < endLocal) {
+        uint currentFrame;
+        float currentValue = readPackedKeyframeValue(
+            baseWord, keyBase, codec, keyStart + uint(currentLocal), currentFrame);
+        if (int(currentFrame) >= clampedFrame) {
+            if (int(currentFrame) <= clampedFrame || currentLocal == previousLocal) {
+                return currentValue;
+            }
+            uint previousFrame;
+            float previousValue = readPackedKeyframeValue(
+                baseWord, keyBase, codec, keyStart + uint(previousLocal), previousFrame);
+            if (currentFrame <= previousFrame) return previousValue;
+            float alpha = float(clampedFrame - int(previousFrame)) /
+                          float(int(currentFrame) - int(previousFrame));
+            return mix(previousValue, currentValue, alpha);
+        }
+        previousLocal = currentLocal;
+        currentLocal += 1;
+    }
+
+    currentLocal = min(currentLocal, int(keyCount) - 1);
+    uint currentFrame;
+    float currentValue = readPackedKeyframeValue(
+        baseWord, keyBase, codec, keyStart + uint(currentLocal), currentFrame);
+    if (int(currentFrame) <= clampedFrame || currentLocal == previousLocal) return currentValue;
+    uint previousFrame;
+    float previousValue = readPackedKeyframeValue(
+        baseWord, keyBase, codec, keyStart + uint(previousLocal), previousFrame);
+    if (currentFrame <= previousFrame) return previousValue;
+    float alpha = float(clampedFrame - int(previousFrame)) /
+                  float(int(currentFrame) - int(previousFrame));
+    return mix(previousValue, currentValue, alpha);
+}
+
+void main()
+{
+    uint leafIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (leafIndex >= pc.leafCount) return;
+    uint wordBegin = offsetsWords[leafIndex];
+    uint packedHeader = payloadWords[wordBegin];
+    uint mode = packedHeader & 0x3u;
+    if (mode == MODE_EMPTY) return;
+    uint compactLeafIndex = compactLeafIndices[leafIndex];
+
+    uint coarseCodec = (packedHeader >> 2u) & 0x3u;
+    uint fineCodec = (packedHeader >> 4u) & 0x3u;
+    uint coarseResolution = (packedHeader >> 6u) & 0x7u;
+    uint fineResolution = (packedHeader >> 9u) & 0x7u;
+    uint coarseKeyframeCount = readPayloadU16(wordBegin, 4u);
+    uint fineKeyframeCount = readPayloadU16(wordBegin, 6u);
+    uint coarseControlCount = coarseResolution * coarseResolution * coarseResolution;
+    uint coarseDescriptorBytes = coarseControlCount * 4u;
+    uint coarseBinBytes = alignUp4(coarseControlCount * TIME_BIN_COUNT);
+    uint coarseKeyframeBytes = alignUp4(
+        coarseKeyframeCount * (coarseCodec == 1u ? 8u : 3u));
+    uint coarseStreamBase = 8u;
+    uint fineStreamBase = coarseStreamBase + coarseDescriptorBytes +
+                          coarseBinBytes + coarseKeyframeBytes;
+
+    for (uint slot = gl_LocalInvocationID.x; slot < CACHE_STRIDE; slot += gl_WorkGroupSize.x) {
+        float value = 0.0;
+        if (slot < COARSE_CACHE_COUNT) {
+            if (slot < coarseControlCount) {
+                value = decodeTemporalControlValue(wordBegin,
+                                                   coarseStreamBase,
+                                                   coarseCodec,
+                                                   coarseControlCount,
+                                                   TIME_BIN_COUNT,
+                                                   coarseKeyframeCount,
+                                                   slot);
+            }
+        }
+        else {
+            uint fineSlot = slot - COARSE_CACHE_COUNT;
+            if (mode == MODE_FINE6) {
+                uint fineControlCount = fineResolution * fineResolution * fineResolution;
+                if (fineSlot < fineControlCount) {
+                    value = decodeTemporalControlValue(wordBegin,
+                                                       fineStreamBase,
+                                                       fineCodec,
+                                                       fineControlCount,
+                                                       TIME_BIN_COUNT,
+                                                       fineKeyframeCount,
+                                                       fineSlot);
+                }
+            }
+            else if (mode == MODE_SHELL) {
+                uint activeCount = readPayloadU16(wordBegin, fineStreamBase + 78u) +
+                                   uint(bitCount(readPayloadU32(wordBegin, fineStreamBase + 56u))) +
+                                   uint(bitCount(readPayloadU32(wordBegin, fineStreamBase + 60u)));
+                if (fineSlot < activeCount) {
+                    value = decodeTemporalControlValue(wordBegin,
+                                                       fineStreamBase + 80u,
+                                                       fineCodec,
+                                                       activeCount,
+                                                       4u,
+                                                       fineKeyframeCount,
+                                                       fineSlot);
+                }
+            }
+        }
+        cachedControls[compactLeafIndex * CACHE_STRIDE + slot] = value;
+    }
+}

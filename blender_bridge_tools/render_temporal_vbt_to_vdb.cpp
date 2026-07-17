@@ -374,7 +374,17 @@ int main(int argc, char** argv)
     auto grid = openvdb::FloatGrid::create(opt.background);
     grid->setGridClass(meta.conversionMode == "levelset" ? openvdb::GRID_LEVEL_SET : openvdb::GRID_FOG_VOLUME);
     grid->setName(opt.gridNameOverride.empty() ? meta.gridName : opt.gridNameOverride);
-    grid->setTransform(openvdb::math::Transform::createLinearTransform(meta.voxelSize));
+    if (meta.indexToWorldDeclared) {
+        openvdb::math::Mat4d matrix;
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                matrix(row, column) = meta.indexToWorld[static_cast<size_t>(row * 4 + column)];
+            }
+        }
+        grid->setTransform(openvdb::math::Transform::createLinearTransform(matrix));
+    } else {
+        grid->setTransform(openvdb::math::Transform::createLinearTransform(meta.voxelSize));
+    }
     auto accessor = grid->getAccessor();
     const int x0 = meta.bboxMin[0];
     const int y0 = meta.bboxMin[1];

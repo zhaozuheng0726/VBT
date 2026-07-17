@@ -1,0 +1,103 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct SmokeRayPacked {
+    vec4 originTmin;
+    vec4 dirTmax;
+};
+
+layout(std430, binding = 0) readonly buffer RayBuffer {
+    SmokeRayPacked rays[];
+};
+
+layout(std430, binding = 1) readonly buffer NanoBuffer {
+    uint pnanovdb_buf_data[];
+};
+
+layout(std430, binding = 2) writeonly buffer ResultBuffer {
+    float results[];
+};
+
+#define PNANOVDB_GLSL
+#include "nanovdb/PNanoVDB.h"
+
+layout(push_constant) uniform PushConstants {
+    uint imageWidth;
+    uint imageHeight;
+    uint rayCount;
+    uint stepCount;
+    uint gridByteOffset;
+    float densityScale;
+} pc;
+
+float sampleNanoValue(pnanovdb_buf_t buf,
+                      pnanovdb_grid_handle_t grid,
+                      uint gridType,
+                      inout pnanovdb_readaccessor_t acc,
+                      ivec3 ijk)
+{
+    pnanovdb_address_t address =
+        pnanovdb_readaccessor_get_value_address(gridType, buf, acc, ijk);
+    return pnanovdb_read_float(buf, address);
+}
+
+float sampleNanoTrilinear(vec3 pWorld)
+{
+    pnanovdb_buf_t buf;
+    pnanovdb_grid_handle_t grid;
+    grid.address.byte_offset = pc.gridByteOffset;
+    uint gridType = pnanovdb_grid_get_grid_type(buf, grid);
+    pnanovdb_tree_handle_t tree = pnanovdb_grid_get_tree(buf, grid);
+    pnanovdb_root_handle_t root = pnanovdb_tree_get_root(buf, tree);
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init(acc, root);
+
+    vec3 xyz = pnanovdb_grid_world_to_indexf(buf, grid, pWorld);
+    ivec3 c0 = ivec3(floor(xyz));
+    ivec3 c1 = c0 + ivec3(1);
+    vec3 t = xyz - vec3(c0);
+
+    float v000 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c0.x, c0.y, c0.z));
+    float v100 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c1.x, c0.y, c0.z));
+    float v010 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c0.x, c1.y, c0.z));
+    float v110 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c1.x, c1.y, c0.z));
+    float v001 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c0.x, c0.y, c1.z));
+    float v101 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c1.x, c0.y, c1.z));
+    float v011 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c0.x, c1.y, c1.z));
+    float v111 = sampleNanoValue(buf, grid, gridType, acc, ivec3(c1.x, c1.y, c1.z));
+
+    float c00 = mix(v000, v100, t.x);
+    float c10 = mix(v010, v110, t.x);
+    float c01 = mix(v001, v101, t.x);
+    float c11 = mix(v011, v111, t.x);
+    float c0m = mix(c00, c10, t.y);
+    float c1m = mix(c01, c11, t.y);
+    return mix(c0m, c1m, t.z);
+}
+
+void main()
+{
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    if (px >= pc.imageWidth || py >= pc.imageHeight) {
+        return;
+    }
+
+    uint rayIndex = py * pc.imageWidth + px;
+    if (rayIndex >= pc.rayCount) {
+        return;
+    }
+
+    SmokeRayPacked ray = rays[rayIndex];
+    float dt = ray.dirTmax.w / max(float(pc.stepCount), 1.0);
+    float t = ray.originTmin.w + 0.5 * dt;
+    float accum = 0.0;
+    for (uint i = 0u; i < pc.stepCount; ++i) {
+        vec3 p = ray.originTmin.xyz + ray.dirTmax.xyz * t;
+        accum += sampleNanoTrilinear(p) * pc.densityScale;
+        t += dt;
+    }
+    results[rayIndex] = accum;
+}

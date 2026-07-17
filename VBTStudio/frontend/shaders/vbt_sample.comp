@@ -1,0 +1,646 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct SmokeRayPacked {
+    vec4 originTmin;
+    vec4 dirTmax;
+};
+
+struct VbtSampleResult {
+    vec4 primary;
+    vec4 auxiliary;
+};
+
+layout(std430, binding = 0) readonly buffer RayBuffer {
+    SmokeRayPacked rays[];
+};
+
+layout(std430, binding = 1) readonly buffer OffsetBuffer {
+    uint offsetsWords[];
+};
+
+layout(std430, binding = 2) readonly buffer PayloadBuffer {
+    uint payloadWords[];
+};
+
+layout(std430, binding = 3) writeonly buffer ResultBuffer {
+    VbtSampleResult results[];
+};
+
+layout(std430, binding = 4) readonly buffer CacheBuffer {
+    float cachedControls[];
+};
+
+layout(std430, binding = 5) readonly buffer ActiveLeafMappingBuffer {
+    uint compactLeafIndices[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint dimX;
+    uint dimY;
+    uint dimZ;
+    uint frames;
+    uint leafSize;
+    uint leafCountX;
+    uint leafCountY;
+    uint imageWidth;
+    uint imageHeight;
+    uint rayCount;
+    uint stepCount;
+    int frameIndex;
+    float bboxMinX;
+    float bboxMinY;
+    float bboxMinZ;
+    uint renderMode;
+    float voxelSize;
+    float backgroundValue;
+    float surfaceIso;
+    float surfaceEpsilonVoxels;
+    float surfaceNormalStep;
+    float maxStepVoxels;
+    uint surfaceModel;
+    float floorHeight;
+    uint shadowSteps;
+    uint padding;
+} pc;
+
+const uint MODE_EMPTY = 0u;
+const uint MODE_GRID4 = 1u;
+const uint MODE_SHELL = 2u;
+const uint MODE_FINE6 = 3u;
+const uint TIME_BIN_COUNT = 8u;
+const uint COARSE_CACHE_COUNT = 64u;
+const uint CACHE_STRIDE = 576u;
+
+uint alignUp4(uint bytes)
+{
+    return (bytes + 3u) & ~3u;
+}
+
+uint readPayloadByte(uint baseWord, uint byteOffset)
+{
+    uint word = payloadWords[baseWord + (byteOffset >> 2u)];
+    uint shift = (byteOffset & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+uint readPayloadU16(uint baseWord, uint byteOffset)
+{
+    return readPayloadByte(baseWord, byteOffset) |
+           (readPayloadByte(baseWord, byteOffset + 1u) << 8u);
+}
+
+float halfToFloat(uint h)
+{
+    uint sign = (h >> 15u) & 1u;
+    uint exponent = (h >> 10u) & 0x1Fu;
+    uint mantissa = h & 0x3FFu;
+    uint bits = 0u;
+    if (exponent == 0u) {
+        if (mantissa == 0u) {
+            bits = sign << 31u;
+        } else {
+            int e = -14;
+            uint m = mantissa;
+            while ((m & 0x400u) == 0u) {
+                m <<= 1u;
+                --e;
+            }
+            m &= 0x3FFu;
+            bits = (sign << 31u) | (uint(e + 127) << 23u) | (m << 13u);
+        }
+    } else if (exponent == 31u) {
+        bits = (sign << 31u) | 0x7F800000u | (mantissa << 13u);
+    } else {
+        bits = (sign << 31u) | ((exponent + 112u) << 23u) | (mantissa << 13u);
+    }
+    return uintBitsToFloat(bits);
+}
+
+float readPackedKeyframeValue(uint baseWord,
+                              uint keyBase,
+                              uint codec,
+                              uint keyIndex,
+                              uint keyframeCount,
+                              out uint keyFrame)
+{
+    if (codec == 1u) {
+        uint offset = keyBase + keyIndex * 8u;
+        keyFrame = readPayloadU16(baseWord, offset);
+        uint b0 = readPayloadByte(baseWord, offset + 4u);
+        uint b1 = readPayloadByte(baseWord, offset + 5u);
+        uint b2 = readPayloadByte(baseWord, offset + 6u);
+        uint b3 = readPayloadByte(baseWord, offset + 7u);
+        uint bits = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
+        return uintBitsToFloat(bits);
+    }
+
+    uint offset = keyBase + keyIndex * 3u;
+    keyFrame = readPayloadByte(baseWord, offset);
+    uint valueBits = readPayloadU16(baseWord, offset + 1u);
+    return halfToFloat(valueBits);
+}
+
+float decodeTemporalControlValue(uint baseWord,
+                                 uint streamBase,
+                                 uint codec,
+                                 uint controlCount,
+                                 uint timeBinCount,
+                                 uint keyframeCount,
+                                 uint controlIndex,
+                                 int totalFrames,
+                                 int frameIndex)
+{
+    uint descriptorBytes = controlCount * 4u;
+    uint binIndexBytes = alignUp4(controlCount * timeBinCount);
+    uint keyBase = streamBase + descriptorBytes + binIndexBytes;
+
+    uint descOffset = streamBase + controlIndex * 4u;
+    uint keyStart = readPayloadU16(baseWord, descOffset);
+    uint keyCount = readPayloadByte(baseWord, descOffset + 2u);
+    uint reserved = readPayloadByte(baseWord, descOffset + 3u);
+    if (keyCount == 0u) return 0.0;
+    if (keyCount == 1u) {
+        uint onlyFrame;
+        return readPackedKeyframeValue(baseWord, keyBase, codec, keyStart, keyframeCount, onlyFrame);
+    }
+
+    int clampedFrame = clamp(frameIndex, 0, max(totalFrames - 1, 0));
+    uint safeTotalFrames = max(uint(totalFrames), 1u);
+    int bin = int(min(timeBinCount - 1u,
+                      (uint(clampedFrame) * timeBinCount) / safeTotalFrames));
+    uint binBase = streamBase + descriptorBytes + controlIndex * timeBinCount;
+    int beginLocal = int(readPayloadByte(baseWord, binBase + uint(bin)));
+    beginLocal = clamp(beginLocal, 0, int(keyCount) - 1);
+
+    int endLocal = int(keyCount);
+    for (int next = bin + 1; next < int(timeBinCount); ++next) {
+        int nextLocal = int(readPayloadByte(baseWord, binBase + uint(next)));
+        if (nextLocal > beginLocal) {
+            endLocal = min(nextLocal, int(keyCount));
+            break;
+        }
+    }
+    int localMaxBinLocalKeys = (reserved != 0u) ? int(reserved) : 8;
+    endLocal = min(endLocal, beginLocal + max(1, localMaxBinLocalKeys));
+
+    int prevLocal = beginLocal;
+    int currLocal = beginLocal;
+    while (currLocal < endLocal) {
+        uint currFrame;
+        float currValue = readPackedKeyframeValue(baseWord, keyBase, codec, keyStart + uint(currLocal), keyframeCount, currFrame);
+        if (int(currFrame) >= clampedFrame) {
+            if (int(currFrame) <= clampedFrame || currLocal == prevLocal) {
+                return currValue;
+            }
+            uint prevFrame;
+            float prevValue = readPackedKeyframeValue(baseWord, keyBase, codec, keyStart + uint(prevLocal), keyframeCount, prevFrame);
+            int f0 = int(prevFrame);
+            int f1 = int(currFrame);
+            if (f1 <= f0) return prevValue;
+            float alpha = float(clampedFrame - f0) / float(f1 - f0);
+            return mix(prevValue, currValue, alpha);
+        }
+        prevLocal = currLocal;
+        currLocal += 1;
+    }
+
+    currLocal = min(currLocal, int(keyCount) - 1);
+    uint currFrame;
+    float currValue = readPackedKeyframeValue(
+        baseWord, keyBase, codec, keyStart + uint(currLocal), keyframeCount, currFrame);
+    if (int(currFrame) <= clampedFrame || currLocal == prevLocal) {
+        return currValue;
+    }
+
+    uint prevFrame;
+    float prevValue = readPackedKeyframeValue(
+        baseWord, keyBase, codec, keyStart + uint(prevLocal), keyframeCount, prevFrame);
+    int f0 = int(prevFrame);
+    int f1 = int(currFrame);
+    if (f1 <= f0) return prevValue;
+    float alpha = float(clampedFrame - f0) / float(f1 - f0);
+    return mix(prevValue, currValue, alpha);
+}
+
+float controlCoord(uint index, uint resolution)
+{
+    if (resolution <= 1u) return 0.0;
+    return float(index) * (7.0 / float(resolution - 1u));
+}
+
+void locateCoord(float p, uint extent, uint resolution, out uint i0, out uint i1, out float w)
+{
+    float maxP = max(float(extent) - 1.0, 0.0);
+    float clamped = clamp(p, 0.0, maxP);
+    i1 = 1u;
+    while (i1 < resolution - 1u && controlCoord(i1, resolution) < clamped) {
+        i1 += 1u;
+    }
+    i0 = max(0, int(i1) - 1);
+    float c0 = controlCoord(i0, resolution);
+    float c1 = controlCoord(i1, resolution);
+    w = (c1 > c0) ? ((clamped - c0) / (c1 - c0)) : 0.0;
+}
+
+uint controlIndex3(uint x, uint y, uint z, uint resolution)
+{
+    return (z * resolution + y) * resolution + x;
+}
+
+float currentFrameControl(uint compactLeafIndex,
+                          uint cacheSlotBase,
+                          uint baseWord,
+                          uint streamBase,
+                          uint codec,
+                          uint controlCount,
+                          uint keyframeCount,
+                          uint controlIndex)
+{
+    if (cacheSlotBase == 0u && controlCount > COARSE_CACHE_COUNT) {
+        return decodeTemporalControlValue(baseWord,
+                                          streamBase,
+                                          codec,
+                                          controlCount,
+                                          TIME_BIN_COUNT,
+                                          keyframeCount,
+                                          controlIndex,
+                                          int(pc.frames),
+                                          pc.frameIndex);
+    }
+    return cachedControls[compactLeafIndex * CACHE_STRIDE + cacheSlotBase + controlIndex];
+}
+
+float sampleControlStream(uint compactLeafIndex,
+                          uint cacheSlotBase,
+                          uint baseWord,
+                          uint streamBase,
+                          uint codec,
+                          uint resolution,
+                          uint keyframeCount,
+                          uint leafWidth,
+                          uint leafHeight,
+                          uint leafDepth,
+                          float lx,
+                          float ly,
+                          float lz)
+{
+    uint x0, x1, y0, y1, z0, z1;
+    float tx, ty, tz;
+    locateCoord(lx, leafWidth, resolution, x0, x1, tx);
+    locateCoord(ly, leafHeight, resolution, y0, y1, ty);
+    locateCoord(lz, leafDepth, resolution, z0, z1, tz);
+
+    uint controlCount = resolution * resolution * resolution;
+    float v000 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x0, y0, z0, resolution));
+    float v100 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x1, y0, z0, resolution));
+    float v010 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x0, y1, z0, resolution));
+    float v110 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x1, y1, z0, resolution));
+    float v001 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x0, y0, z1, resolution));
+    float v101 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x1, y0, z1, resolution));
+    float v011 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x0, y1, z1, resolution));
+    float v111 = currentFrameControl(compactLeafIndex, cacheSlotBase, baseWord, streamBase, codec, controlCount, keyframeCount, controlIndex3(x1, y1, z1, resolution));
+
+    float c00 = mix(v000, v100, tx);
+    float c10 = mix(v010, v110, tx);
+    float c01 = mix(v001, v101, tx);
+    float c11 = mix(v011, v111, tx);
+    float c0 = mix(c00, c10, ty);
+    float c1 = mix(c01, c11, ty);
+    return mix(c0, c1, tz);
+}
+
+uint readPayloadU32(uint baseWord, uint byteOffset)
+{
+    return readPayloadByte(baseWord, byteOffset) |
+           (readPayloadByte(baseWord, byteOffset + 1u) << 8u) |
+           (readPayloadByte(baseWord, byteOffset + 2u) << 16u) |
+           (readPayloadByte(baseWord, byteOffset + 3u) << 24u);
+}
+
+float sampleShellResidual(uint baseWord,
+                          uint occupancyBase,
+                          uint compactLeafIndex,
+                          uint voxelIndex,
+                          out bool occupied)
+{
+    uint group = voxelIndex >> 6u;
+    uint bit = voxelIndex & 63u;
+    uint wordInGroup = bit >> 5u;
+    uint localBit = bit & 31u;
+    uint maskWord = readPayloadU32(baseWord, occupancyBase + group * 8u + wordInGroup * 4u);
+    occupied = ((maskWord >> localBit) & 1u) != 0u;
+    if (!occupied) return 0.0;
+
+    uint prefix = readPayloadU16(baseWord, occupancyBase + 64u + group * 2u);
+    uint lowWord = readPayloadU32(baseWord, occupancyBase + group * 8u);
+    uint descriptorIndex = prefix;
+    if (wordInGroup != 0u) descriptorIndex += uint(bitCount(lowWord));
+    uint beforeMask = localBit == 0u ? 0u : (0xffffffffu >> (32u - localBit));
+    descriptorIndex += uint(bitCount(maskWord & beforeMask));
+
+    return cachedControls[compactLeafIndex * CACHE_STRIDE + COARSE_CACHE_COUNT + descriptorIndex];
+}
+
+float sampleVbtValue(vec3 pWorld, bool preserveInterior)
+{
+    vec3 p = pWorld - vec3(pc.bboxMinX, pc.bboxMinY, pc.bboxMinZ);
+    if (any(lessThan(p, vec3(0.0))) ||
+        p.x > float(pc.dimX - 1u) ||
+        p.y > float(pc.dimY - 1u) ||
+        p.z > float(pc.dimZ - 1u)) {
+        return pc.renderMode == 1u ? pc.backgroundValue : 0.0;
+    }
+
+    uint x = min(pc.dimX - 1u, uint(floor(p.x)));
+    uint y = min(pc.dimY - 1u, uint(floor(p.y)));
+    uint z = min(pc.dimZ - 1u, uint(floor(p.z)));
+    uint bx = min(pc.leafCountX - 1u, x / pc.leafSize);
+    uint by = min(pc.leafCountY - 1u, y / pc.leafSize);
+    uint leafCountZ = (pc.dimZ + pc.leafSize - 1u) / pc.leafSize;
+    uint bz = min(leafCountZ - 1u, z / pc.leafSize);
+    uint leafIndex = (bz * pc.leafCountY + by) * pc.leafCountX + bx;
+
+    uint wordBegin = offsetsWords[leafIndex];
+    uint wordEnd = offsetsWords[leafIndex + 1u];
+    if (wordEnd <= wordBegin) return pc.renderMode == 1u ? pc.backgroundValue : 0.0;
+
+    uint packedHeader = payloadWords[wordBegin];
+    uint mode = packedHeader & 0x3u;
+    if (mode == MODE_EMPTY) return pc.renderMode == 1u ? pc.backgroundValue : 0.0;
+    uint compactLeafIndex = compactLeafIndices[leafIndex];
+
+    uint coarseCodec = (packedHeader >> 2u) & 0x3u;
+    uint fineCodec = (packedHeader >> 4u) & 0x3u;
+    uint coarseResolution = (packedHeader >> 6u) & 0x7u;
+    uint fineResolution = (packedHeader >> 9u) & 0x7u;
+    uint coarseKeyframeCount = readPayloadU16(wordBegin, 4u);
+    uint fineKeyframeCount = readPayloadU16(wordBegin, 6u);
+
+    uint coarseControlCount = coarseResolution * coarseResolution * coarseResolution;
+    uint coarseDescriptorBytes = coarseControlCount * 4u;
+    uint coarseBinBytes = alignUp4(coarseControlCount * TIME_BIN_COUNT);
+    uint coarseKeyframeBytes = alignUp4(coarseKeyframeCount * ((coarseCodec == 1u) ? 8u : 3u));
+    uint coarseStreamBase = 8u;
+    uint fineStreamBase = coarseStreamBase + coarseDescriptorBytes + coarseBinBytes + coarseKeyframeBytes;
+
+    uint baseX = bx * pc.leafSize;
+    uint baseY = by * pc.leafSize;
+    uint baseZ = bz * pc.leafSize;
+    uint leafWidth = min(pc.leafSize, pc.dimX - baseX);
+    uint leafHeight = min(pc.leafSize, pc.dimY - baseY);
+    uint leafDepth = min(pc.leafSize, pc.dimZ - baseZ);
+    float lx = p.x - float(baseX);
+    float ly = p.y - float(baseY);
+    float lz = p.z - float(baseZ);
+
+    float value = sampleControlStream(compactLeafIndex,
+                                      0u,
+                                      wordBegin,
+                                      coarseStreamBase,
+                                      coarseCodec,
+                                      coarseResolution,
+                                      coarseKeyframeCount,
+                                      leafWidth,
+                                      leafHeight,
+                                      leafDepth,
+                                      lx, ly, lz);
+
+    if (mode == MODE_FINE6 && fineResolution > 0u) {
+        value += sampleControlStream(compactLeafIndex,
+                                     COARSE_CACHE_COUNT,
+                                     wordBegin,
+                                     fineStreamBase,
+                                     fineCodec,
+                                     fineResolution,
+                                     fineKeyframeCount,
+                                     leafWidth,
+                                     leafHeight,
+                                     leafDepth,
+                                     lx, ly, lz);
+    }
+    else if (mode == MODE_SHELL) {
+        uint localX = uint(clamp(round(lx), 0.0, 7.0));
+        uint localY = uint(clamp(round(ly), 0.0, 7.0));
+        uint localZ = uint(clamp(round(lz), 0.0, 7.0));
+        uint voxelIndex = (localZ * 8u + localY) * 8u + localX;
+        bool occupied = false;
+        value += sampleShellResidual(wordBegin,
+                                     fineStreamBase,
+                                     compactLeafIndex,
+                                     voxelIndex,
+                                     occupied);
+        if (!preserveInterior && !occupied && value < 0.0) {
+            value = pc.renderMode == 1u ? pc.backgroundValue : 0.0;
+        }
+    }
+    return value;
+}
+
+bool intersectWorldBox(vec3 origin, vec3 direction, out float nearT, out float farT)
+{
+    vec3 minimum = vec3(pc.bboxMinX, pc.bboxMinY, pc.bboxMinZ);
+    vec3 maximum = minimum + vec3(pc.dimX - 1u, pc.dimY - 1u, pc.dimZ - 1u);
+    vec3 inverseDirection = 1.0 / direction;
+    vec3 first = (minimum - origin) * inverseDirection;
+    vec3 second = (maximum - origin) * inverseDirection;
+    vec3 minimumT = min(first, second);
+    vec3 maximumT = max(first, second);
+    nearT = max(0.0, max(minimumT.x, max(minimumT.y, minimumT.z)));
+    farT = min(maximumT.x, min(maximumT.y, maximumT.z));
+    return farT > nearT;
+}
+
+float traceShadow(vec3 origin, vec3 direction)
+{
+    float nearT;
+    float farT;
+    if (!intersectWorldBox(origin, direction, nearT, farT)) return 0.0;
+    float epsilon = max(pc.surfaceEpsilonVoxels * pc.voxelSize, 1e-5);
+    float t = nearT;
+    float previousPhi = sampleVbtValue(origin + direction * t, false) - pc.surfaceIso;
+    for (uint iteration = 0u; iteration < pc.shadowSteps; ++iteration) {
+        float stepVoxels = clamp(abs(previousPhi) / max(pc.voxelSize, 1e-6) * 0.8, 0.35, 5.0);
+        float nextT = min(t + stepVoxels, farT);
+        float nextPhi = sampleVbtValue(origin + direction * nextT, false) - pc.surfaceIso;
+        if ((previousPhi < 0.0) != (nextPhi < 0.0)) {
+            bool nextInside = nextPhi < 0.0;
+            float negativePhi = nextInside ? nextPhi : previousPhi;
+            float supportT = nextInside ? min(nextT + 0.35, farT) : max(t - 0.35, nearT);
+            float supportPhi = sampleVbtValue(origin + direction * supportT, false) - pc.surfaceIso;
+            if (negativePhi <= -epsilon * 0.5 || supportPhi <= -epsilon * 0.25) return 1.0;
+        }
+        if (nextT >= farT) break;
+        t = nextT;
+        previousPhi = abs(nextPhi) <= epsilon ? epsilon : nextPhi;
+    }
+    return 0.0;
+}
+
+float estimateThickness(SmokeRayPacked ray, float hitT)
+{
+    float epsilon = max(pc.surfaceEpsilonVoxels * pc.voxelSize, 1e-5);
+    float t = min(hitT + 0.35, ray.dirTmax.w);
+    float previousPhi = sampleVbtValue(ray.originTmin.xyz + ray.dirTmax.xyz * t, true) - pc.surfaceIso;
+    bool enteredInterior = previousPhi < -0.25 * epsilon;
+    uint limit = min(pc.stepCount, 160u);
+    for (uint iteration = 0u; iteration < limit; ++iteration) {
+        float stepVoxels = clamp(abs(previousPhi) / max(pc.voxelSize, 1e-6) * 0.7, 0.3, 3.0);
+        float nextT = min(t + stepVoxels, ray.dirTmax.w);
+        float nextPhi = sampleVbtValue(ray.originTmin.xyz + ray.dirTmax.xyz * nextT, true) - pc.surfaceIso;
+        enteredInterior = enteredInterior || nextPhi < -0.25 * epsilon;
+        if (enteredInterior && previousPhi < 0.0 && nextPhi >= 0.0) {
+            return max((nextT - hitT) * pc.voxelSize, pc.voxelSize * 0.25);
+        }
+        if (nextT >= ray.dirTmax.w) break;
+        t = nextT;
+        previousPhi = nextPhi;
+    }
+    return pc.voxelSize * 6.0;
+}
+
+VbtSampleResult traceLevelSet(SmokeRayPacked ray)
+{
+    VbtSampleResult result;
+    result.primary = vec4(0.0, 0.0, 0.0, -1.0);
+    result.auxiliary = vec4(0.0);
+    if (ray.dirTmax.w <= 0.0) return result;
+    float epsilon = max(pc.surfaceEpsilonVoxels * pc.voxelSize, 1e-5);
+    float previousT = 0.0;
+    float previousPhi = sampleVbtValue(ray.originTmin.xyz, false) - pc.surfaceIso;
+    float hitT = -1.0;
+
+    for (uint iteration = 0u; iteration < pc.stepCount; ++iteration) {
+        float stepVoxels = clamp(abs(previousPhi) / max(pc.voxelSize, 1e-6) * 0.8,
+                                 0.2,
+                                 max(pc.maxStepVoxels, 0.2));
+        float currentT = min(previousT + stepVoxels, ray.dirTmax.w);
+        vec3 currentPoint = ray.originTmin.xyz + ray.dirTmax.xyz * currentT;
+        float currentPhi = sampleVbtValue(currentPoint, false) - pc.surfaceIso;
+        if ((previousPhi < 0.0) != (currentPhi < 0.0)) {
+            bool currentInside = currentPhi < 0.0;
+            float negativePhi = currentInside ? currentPhi : previousPhi;
+            float supportT = currentInside ? min(currentT + 0.35, ray.dirTmax.w)
+                                           : max(previousT - 0.35, 0.0);
+            float supportPhi = sampleVbtValue(
+                                   ray.originTmin.xyz + ray.dirTmax.xyz * supportT, false) -
+                               pc.surfaceIso;
+            bool hasInteriorSupport = negativePhi <= -epsilon * 0.5 ||
+                                      supportPhi <= -epsilon * 0.25;
+            if (!hasInteriorSupport) {
+                if (currentT >= ray.dirTmax.w) break;
+                previousT = currentT;
+                previousPhi = max(currentPhi, epsilon);
+                continue;
+            }
+            float low = previousT;
+            float high = currentT;
+            float lowPhi = previousPhi;
+            for (uint refine = 0u; refine < 5u; ++refine) {
+                float middle = 0.5 * (low + high);
+                float middlePhi = sampleVbtValue(ray.originTmin.xyz + ray.dirTmax.xyz * middle, false) - pc.surfaceIso;
+                if ((lowPhi < 0.0) != (middlePhi < 0.0)) {
+                    high = middle;
+                }
+                else {
+                    low = middle;
+                    lowPhi = middlePhi;
+                }
+            }
+            hitT = 0.5 * (low + high);
+            break;
+        }
+        if (currentT >= ray.dirTmax.w) break;
+        previousT = currentT;
+        previousPhi = currentPhi;
+    }
+    if (hitT < 0.0) return result;
+
+    vec3 hitPoint = ray.originTmin.xyz + ray.dirTmax.xyz * hitT;
+    float normalStep = max(pc.surfaceNormalStep, 0.25);
+    vec3 gradient = vec3(
+        sampleVbtValue(hitPoint + vec3(normalStep, 0.0, 0.0), false) -
+            sampleVbtValue(hitPoint - vec3(normalStep, 0.0, 0.0), false),
+        sampleVbtValue(hitPoint + vec3(0.0, normalStep, 0.0), false) -
+            sampleVbtValue(hitPoint - vec3(0.0, normalStep, 0.0), false),
+        sampleVbtValue(hitPoint + vec3(0.0, 0.0, normalStep), false) -
+            sampleVbtValue(hitPoint - vec3(0.0, 0.0, normalStep), false));
+    float gradientLength = length(gradient);
+    vec3 normal = gradientLength > 1e-6 ? gradient / gradientLength : -ray.dirTmax.xyz;
+    result.primary = vec4(normal, hitT);
+    result.auxiliary.x = pc.surfaceModel != 0u ? estimateThickness(ray, hitT) : 0.0;
+    result.auxiliary.w = abs(dot(normal, -ray.dirTmax.xyz));
+    return result;
+}
+
+void main()
+{
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    if (px >= pc.imageWidth || py >= pc.imageHeight) {
+        return;
+    }
+
+    uint rayIndex = py * pc.imageWidth + px;
+    if (rayIndex >= pc.rayCount) {
+        return;
+    }
+
+    SmokeRayPacked ray = rays[rayIndex];
+    if (pc.renderMode == 1u) {
+        VbtSampleResult surface = traceLevelSet(ray);
+        float floorDirection = pc.padding == 2u ? ray.dirTmax.z : ray.dirTmax.y;
+        float floorOrigin = pc.padding == 2u ? ray.originTmin.z : ray.originTmin.y;
+        if (pc.surfaceModel != 0u && surface.primary.w < 0.0 && floorDirection < -1e-5) {
+            float floorT = (pc.floorHeight - floorOrigin) / floorDirection;
+            if (floorT > 0.0) {
+                vec3 floorPoint = ray.originTmin.xyz + ray.dirTmax.xyz * floorT;
+                vec3 keyDirection = normalize(pc.padding == 2u
+                                                  ? vec3(-0.55, 0.42, 0.72)
+                                                  : vec3(-0.55, 0.72, 0.42));
+                surface.auxiliary.y = 1.0;
+                surface.auxiliary.z = traceShadow(floorPoint + keyDirection * 0.5, keyDirection);
+            }
+        }
+        results[rayIndex] = surface;
+        return;
+    }
+    float dt = ray.dirTmax.w / max(float(pc.stepCount), 1.0);
+    float t = ray.originTmin.w + 0.5 * dt;
+    if (pc.surfaceModel != 0u) {
+        float bin0 = 0.0;
+        float bin1 = 0.0;
+        float bin2 = 0.0;
+        float bin3 = 0.0;
+        float bin4 = 0.0;
+        float bin5 = 0.0;
+        float bin6 = 0.0;
+        float bin7 = 0.0;
+        for (uint i = 0u; i < pc.stepCount; ++i) {
+            vec3 p = ray.originTmin.xyz + ray.dirTmax.xyz * t;
+            float value = sampleVbtValue(p, false);
+            uint bin = min((i * 8u) / max(pc.stepCount, 1u), 7u);
+            if (bin == 0u) bin0 += value;
+            else if (bin == 1u) bin1 += value;
+            else if (bin == 2u) bin2 += value;
+            else if (bin == 3u) bin3 += value;
+            else if (bin == 4u) bin4 += value;
+            else if (bin == 5u) bin5 += value;
+            else if (bin == 6u) bin6 += value;
+            else bin7 += value;
+            t += dt;
+        }
+        results[rayIndex].primary = vec4(bin0, bin1, bin2, bin3);
+        results[rayIndex].auxiliary = vec4(bin4, bin5, bin6, bin7);
+        return;
+    }
+    float accum = 0.0;
+    for (uint i = 0u; i < pc.stepCount; ++i) {
+        vec3 p = ray.originTmin.xyz + ray.dirTmax.xyz * t;
+        accum += sampleVbtValue(p, false);
+        t += dt;
+    }
+    results[rayIndex].primary = vec4(accum, 0.0, 0.0, 0.0);
+    results[rayIndex].auxiliary = vec4(0.0);
+}

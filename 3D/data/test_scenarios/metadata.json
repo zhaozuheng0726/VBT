@@ -1,0 +1,49 @@
+{
+  "dataset_name": "isotropic1024coarse",
+  "variable": "pressure",
+  "dimensions": [
+    256,
+    256,
+    256,
+    100
+  ],
+  "axis_order": [
+    "X",
+    "Y",
+    "Z",
+    "T"
+  ],
+  "time_is_fastest_dimension": true,
+  "data_type": "float32",
+  "file_name": "isotropic_256x256x256_100f.raw",
+  "global_min": -4.124538421630859,
+  "global_max": 1.139139175415039,
+  "normalization": "minus1_1",
+  "source_indexing": {
+    "api_is_1_based": true,
+    "requested_start_0_based": {
+      "x": 0,
+      "y": 0,
+      "z": 0,
+      "t": 0
+    },
+    "actual_api_ranges_inclusive": {
+      "x": [
+        1,
+        256
+      ],
+      "y": [
+        1,
+        256
+      ],
+      "z": [
+        1,
+        256
+      ],
+      "t": [
+        1,
+        100
+      ]
+    }
+  }
+}

@@ -33,6 +33,43 @@ INDUSTRIAL_CHIMNEY_PRESET = {
     "anisotropy": 0.28,
 }
 
+INDUSTRIAL_CHIMNEY_PAPER_PRESET = {
+    "camera_azimuth_deg": 270.0,
+    "camera_elevation_deg": -5.0,
+    "camera_distance_scale": 2.5,
+    "target_offset": (0.0, 0.0, -0.20),
+    "lens": 35.0,
+    "world_kind": "studio_gray",
+    "density_scale": 768.0,
+    "density_gamma": 1.0,
+    "density_threshold": 0.0,
+    "volume_color": (0.68, 0.72, 0.78),
+    "anisotropy": 0.2,
+}
+
+MATERIAL_PRESETS = {
+    "paper_gray": {
+        "density_scale": 768.0,
+        "volume_color": (0.68, 0.72, 0.78),
+        "anisotropy": 0.2,
+    },
+    "charcoal": {
+        "density_scale": 1152.0,
+        "volume_color": (0.18, 0.20, 0.24),
+        "anisotropy": 0.12,
+    },
+    "soft_ash": {
+        "density_scale": 640.0,
+        "volume_color": (0.52, 0.56, 0.62),
+        "anisotropy": 0.38,
+    },
+    "cool_steel": {
+        "density_scale": 900.0,
+        "volume_color": (0.30, 0.40, 0.58),
+        "anisotropy": 0.24,
+    },
+}
+
 
 def _argv_after_double_dash() -> list[str]:
     if "--" not in sys.argv:
@@ -399,9 +436,12 @@ def _configure_camera(
 
 
 def _apply_case_preset(args: argparse.Namespace) -> None:
-    if args.case_preset != "industrial_chimney":
+    if args.case_preset == "industrial_chimney":
+        preset = INDUSTRIAL_CHIMNEY_PRESET
+    elif args.case_preset == "industrial_chimney_paper":
+        preset = INDUSTRIAL_CHIMNEY_PAPER_PRESET
+    else:
         return
-    preset = INDUSTRIAL_CHIMNEY_PRESET
     if args.density_scale is None:
         args.density_scale = preset["density_scale"]
     if args.density_gamma is None:
@@ -426,9 +466,30 @@ def _apply_case_preset(args: argparse.Namespace) -> None:
         args.target_offset = ",".join(str(v) for v in preset["target_offset"])
 
 
+def _apply_material_preset(args: argparse.Namespace) -> None:
+    if args.material_preset == "custom":
+        return
+    preset = MATERIAL_PRESETS[args.material_preset]
+    if args.density_scale is None:
+        args.density_scale = preset["density_scale"]
+    if args.volume_color is None:
+        args.volume_color = ",".join(str(v) for v in preset["volume_color"])
+    if args.anisotropy is None:
+        args.anisotropy = preset["anisotropy"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case-preset", choices=("none", "industrial_chimney"), default="none")
+    parser.add_argument(
+        "--case-preset",
+        choices=("none", "industrial_chimney", "industrial_chimney_paper"),
+        default="none",
+    )
+    parser.add_argument(
+        "--material-preset",
+        choices=("custom", *MATERIAL_PRESETS.keys()),
+        default="custom",
+    )
     parser.add_argument("--device", choices=("CPU", "CUDA"), default="CPU")
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--width", type=int, default=320)
@@ -442,7 +503,11 @@ def main() -> int:
     parser.add_argument("--anisotropy", type=float, default=None)
     parser.add_argument("--world-color", default="0.035,0.040,0.045")
     parser.add_argument("--world-strength", type=float, default=0.35)
-    parser.add_argument("--world-kind", choices=("studio_gray", "dark_stage", "default"), default=None)
+    parser.add_argument(
+        "--world-kind",
+        choices=("studio_gray", "dark_stage", "default"),
+        default=None,
+    )
     parser.add_argument("--exposure", type=float, default=-0.1)
     parser.add_argument("--look", default="Medium High Contrast")
     parser.add_argument("--auto-camera", action="store_true")
@@ -457,7 +522,15 @@ def main() -> int:
     parser.add_argument("--showcase-material", action="store_true")
     parser.add_argument("--denoise", action="store_true")
     args = parser.parse_args(_argv_after_double_dash())
+    _apply_material_preset(args)
     _apply_case_preset(args)
+    if (
+        args.case_preset == "industrial_chimney_paper" or args.material_preset != "custom"
+    ) and args.showcase_material:
+        raise ValueError(
+            "paper and material presets require the direct Principled density-attribute path; "
+            "do not pass --showcase-material"
+        )
 
     _configure_cycles_device(args.device)
 
@@ -498,6 +571,17 @@ def main() -> int:
         )
     else:
         _configure_volume_material(args.density_scale, volume_color, anisotropy)
+    print(
+        "VBT_MATERIAL",
+        {
+            "preset": args.material_preset,
+            "path": "showcase" if args.showcase_material else "direct_density_attribute",
+            "density_scale": args.density_scale,
+            "volume_color": volume_color,
+            "anisotropy": anisotropy,
+        },
+        flush=True,
+    )
 
     orbit = None
     if (

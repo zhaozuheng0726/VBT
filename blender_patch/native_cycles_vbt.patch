@@ -297,7 +297,7 @@ index 9c2b7906..37994f38 100644
 +      continue;
 +    }
 +
-+    device_image *image = handle.resident_image_memory();
++    device_image *image = handle.vdb_image_memory();
 +    if (image == nullptr || image->host_pointer == nullptr ||
 +        image->info.data_type != IMAGE_DATA_TYPE_VBT_DENSITY ||
 +        image->memory_size() < sizeof(KernelVBTHeader))
@@ -370,15 +370,6 @@ index 9c2b7906..37994f38 100644
  #if defined(WITH_OPENVDB) && defined(WITH_NANOVDB)
    /* Create volume mesh builder. */
    VolumeMeshBuilder builder;
-@@ -662,7 +740,7 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
-     }
- 
-     /* Create NanoVDB grid handle from image memory. */
--    device_image *image = handle.vdb_image_memory();
-+    device_image *image = handle.resident_image_memory();
-     if (image == nullptr || image->host_pointer == nullptr ||
-         image->info.data_type == IMAGE_DATA_TYPE_NANOVDB_EMPTY ||
-         !is_nanovdb_type(image->info.data_type))
 diff --git a/intern/cycles/util/image_metadata.cpp b/intern/cycles/util/image_metadata.cpp
 index 92c0a18f..28867ef2 100644
 --- a/intern/cycles/util/image_metadata.cpp
@@ -963,6 +954,58 @@ index 00000000..38897f47
 +}
 +
 +CCL_NAMESPACE_END
+diff --git a/intern/cycles/device/cuda/device_impl.cpp b/intern/cycles/device/cuda/device_impl.cpp
+index 1c5c1ae7..0774de3c 100644
+--- a/intern/cycles/device/cuda/device_impl.cpp
++++ b/intern/cycles/device/cuda/device_impl.cpp
+@@ -844,7 +844,7 @@ void CUDADevice::image_alloc(device_image &mem)
+   /* Set Mapping and tag that we need to (re-)upload to device */
+   KernelImageInfo tex_info = mem.info;
+ 
+-  if (!is_nanovdb_type(mem.info.data_type)) {
++  if (!is_resident_image_buffer_type(mem.info.data_type)) {
+     CUDA_RESOURCE_DESC resDesc;
+     memset(&resDesc, 0, sizeof(resDesc));
+ 
+diff --git a/intern/cycles/device/hip/device_impl.cpp b/intern/cycles/device/hip/device_impl.cpp
+index c14ae480..3375c91a 100644
+--- a/intern/cycles/device/hip/device_impl.cpp
++++ b/intern/cycles/device/hip/device_impl.cpp
+@@ -794,7 +794,7 @@ void HIPDevice::image_alloc(device_image &mem)
+   /* Set Mapping and tag that we need to (re-)upload to device */
+   KernelImageInfo tex_info = mem.info;
+ 
+-  if (!is_nanovdb_type(mem.info.data_type)) {
++  if (!is_resident_image_buffer_type(mem.info.data_type)) {
+     /* Bindless textures. */
+     hipResourceDesc resDesc;
+     memset(&resDesc, 0, sizeof(resDesc));
+diff --git a/intern/cycles/device/metal/device_impl.mm b/intern/cycles/device/metal/device_impl.mm
+index 3df3377f..256a693c 100644
+--- a/intern/cycles/device/metal/device_impl.mm
++++ b/intern/cycles/device/metal/device_impl.mm
+@@ -995,7 +995,7 @@ void MetalDevice::image_alloc_as_buffer(device_image &mem)
+   image_info[image_info_id] = mem.info;
+   image_info_id_map[image_info_id] = mmem->mtlBuffer;
+ 
+-  if (is_nanovdb_type(mem.info.data_type)) {
++  if (is_resident_image_buffer_type(mem.info.data_type)) {
+     using_nanovdb = true;
+   }
+ }
+diff --git a/intern/cycles/device/oneapi/device_impl.cpp b/intern/cycles/device/oneapi/device_impl.cpp
+index 1bfa0079..8cf0d6ad 100644
+--- a/intern/cycles/device/oneapi/device_impl.cpp
++++ b/intern/cycles/device/oneapi/device_impl.cpp
+@@ -846,7 +846,7 @@ void OneapiDevice::image_alloc(device_image &mem)
+     sycl::ext::oneapi::experimental::bindless_image_sampler samp(
+         address_mode, sycl::coordinate_normalization_mode::normalized, filter_mode);
+ 
+-    if (!is_nanovdb_type(mem.info.data_type)) {
++    if (!is_resident_image_buffer_type(mem.info.data_type)) {
+       sycl::ext::oneapi::experimental::sampled_image_handle imgHandle;
+ 
+       if (memHandle.raw_handle) {
 diff --git a/intern/cycles/scene/image_vbt.h b/intern/cycles/scene/image_vbt.h
 new file mode 100644
 index 00000000..bd5a6eda

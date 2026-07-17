@@ -413,8 +413,10 @@ float decodeRenderTemporalLeafShellVoxelValue(const uint8_t* leafBase,
     const uint32_t group = static_cast<uint32_t>(voxelIndex >> 6);
     const uint32_t bit = static_cast<uint32_t>(voxelIndex & 63);
 
-    const uint32_t shellOffset = leafView.layout.coarseOffset + leafView.layout.coarse.totalBytes;
-    const auto section = unpackRenderTemporalShellOccupancySection(leafBase + shellOffset, 80);
+    const uint32_t shellOffset = leafView.layout.fine.descriptorOffset;
+    const auto section = unpackRenderTemporalShellOccupancySection(
+        leafBase + shellOffset,
+        leafView.layout.fine.descriptorBytes);
     const uint64_t mask = section.shellMask[group];
     if ((mask & (1ull << bit)) == 0ull) {
         return 0.0f;
@@ -425,32 +427,18 @@ float decodeRenderTemporalLeafShellVoxelValue(const uint8_t* leafBase,
         descIndex += 1;
     }
 
-    uint32_t residualOffset = shellOffset + 80;
-    if (alignTo4Bytes) {
-        while ((residualOffset & 3u) != 0u) residualOffset += 1;
-    }
-    const uint16_t activeCount = renderTemporalShellActiveVoxelCount(section);
+    const uint32_t residualOffset = leafView.shellResidualOffset;
+    const uint16_t activeCount = leafView.shellActiveVoxelCount;
     if (activeCount == 0 || leafView.prefix.fineKeyframeCount == 0) {
         return 0.0f;
     }
-    // Compute residual stream total bytes dynamically, matching computeStreamLayout
-    // (descriptor + binIndex + keyframes), since the static leaf layout does not know
-    // the per-leaf active voxel count for Mode2.
-    const uint32_t kKfBytes = (leafView.header.fineCodec == RenderTemporalSequenceCodec::DP_KEYFRAME_FP32) ? 8u : 3u;
-    auto alignUp4 = [](uint32_t b) { return (b + 3u) & ~3u; };
-    const uint32_t descriptorBytes = static_cast<uint32_t>(activeCount) * kRenderTemporalControlDescriptorBytes;
-    const uint32_t binIndexBytesRaw = static_cast<uint32_t>(activeCount) * kRenderTemporalShellPackedTimeBinCount;
-    const uint32_t binIndexBytes = alignTo4Bytes ? alignUp4(binIndexBytesRaw) : binIndexBytesRaw;
-    const uint32_t kfBytesRaw = static_cast<uint32_t>(leafView.prefix.fineKeyframeCount) * kKfBytes;
-    const uint32_t kfBytes = alignTo4Bytes ? alignUp4(kfBytesRaw) : kfBytesRaw;
-    const uint32_t residualBytes = descriptorBytes + binIndexBytes + kfBytes;
     return decodeRenderTemporalControlValue(leafBase + residualOffset,
                                             leafView.header.fineCodec,
                                             activeCount,
                                             kRenderTemporalShellPackedTimeBinCount,
                                             0u,
                                             leafView.prefix.fineKeyframeCount,
-                                            residualBytes,
+                                            leafView.shellResidualBytes,
                                             alignTo4Bytes,
                                             totalFrames,
                                             descIndex,

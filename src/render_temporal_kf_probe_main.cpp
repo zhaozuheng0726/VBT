@@ -39,6 +39,7 @@ struct ProbeCliOptions {
     int exportFrameIndex = -1;
     int sampleStep = 4;
     int ompThreads = 0;
+    bool finalOnly = false;
     float cutoff = 0.0003f;
     float cutoffBand = 0.0001f;
     float temporalEpsAbs = 1e-5f;
@@ -60,6 +61,11 @@ struct ProbeCliOptions {
     RenderTemporalSequenceCodec packedCodec = RenderTemporalSequenceCodec::DP_KEYFRAME_FP16;
     uint64_t savedFileBytes = 0;
     bool preferShellVoxelSave = false;
+    bool levelSetSurfaceMode = false;
+    bool legacyLevelSetRoute = false;
+    float levelSetSurfaceBand = 0.0f;
+    float levelSetCoarseGuardBand = 0.0f;
+    float levelSetTemporalBand = 0.0f;
 };
 
 struct DensityTemporalProfile {
@@ -69,6 +75,9 @@ struct DensityTemporalProfile {
     float renderCutoff = 0.0003f;
     float cutoffBand = 0.0001f;
     bool cutoffTemporalProtect = true;
+    bool isoSurfaceProtect = false;
+    float isoValue = 0.0f;
+    float isoBand = 0.0f;
 };
 
 struct GenericTemporalStats {
@@ -136,11 +145,15 @@ void printUsage()
         << "                              [--control-eps-scale 1.0]\n"
         << "                              [--temporal-gamma-delta 0.2] [--bg-zero-ratio 0.30]\n"
         << "                              [--packed-keyframe-codec fp16|fp32]\n"
+        << "                              [--final-only]\n"
         << "                              [--route-empty-visible-thr 0.001] [--route-fine-visible-thr 0.02]\n"
         << "                              [--route-fine-band-thr 0.01] [--route-coarse-rmse-thr 0.015]\n"
         << "                              [--route-coarse-peak-thr 0.06] [--route-fine-gain-thr 0.15]\n"
+        << "                              [--levelset-surface-band <world-distance>]\n"
+        << "                              [--levelset-coarse-guard-band <world-distance>]\n"
+        << "                              [--levelset-temporal-band <world-distance>] [--legacy-levelset-route]\n"
         << "                              [--cutoff-protect|--no-cutoff-protect]\n"
-        << "                              [--omp-threads N] [--report <path>]\n";
+        << "                              [--omp-threads N] [--save-vbt <file.vbtp>] [--report <path>]\n";
 }
 
 double computePsnr(double rmse, double peak)
@@ -241,6 +254,10 @@ void dpRecurse(const std::vector<float>& values,
 std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
                                         const DensityTemporalProfile& profile,
                                         bool* usedCutoffProtect);
+void addIsoSurfaceKeyFrames(const std::vector<float>& values,
+                           float isoValue,
+                           float isoBand,
+                           std::vector<int>& keys);
 
 void reconstructFromKeys(const std::vector<float>& values,
                          const std::vector<int>& keys,
@@ -248,7 +265,11 @@ void reconstructFromKeys(const std::vector<float>& values,
 
 inline int localVoxelIndex(int lx, int ly, int lz)
 {
-    return (lz * kLeafSize + ly) * kLeafSize + lx;
+    return static_cast<int>(renderTemporalLeafVoxelIndex(
+        static_cast<uint16_t>(lx),
+        static_cast<uint16_t>(ly),
+        static_cast<uint16_t>(lz),
+        static_cast<uint16_t>(kLeafSize)));
 }
 
 inline int localTileVoxelIndex(int lx, int ly, int lz)
@@ -381,7 +402,23 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     if (cli.ompThreads > 0) omp_set_num_threads(cli.ompThreads);
 #endif
 
-    const auto raw = loadRawVolume(cli.inputRaw, cli.metadataPath);
+    const auto raw = loadRawVolumeMapped(cli.inputRaw, cli.metadataPath);
+    cli.levelSetSurfaceMode =
+        raw.meta.conversionMode == "levelset" && !cli.legacyLevelSetRoute;
+    if (cli.levelSetSurfaceMode) {
+        if (cli.levelSetSurfaceBand <= 0.0f) {
+            cli.levelSetSurfaceBand =
+                (raw.meta.shellWidthVoxels > 0.0f ? raw.meta.shellWidthVoxels : 1.5f) *
+                raw.meta.voxelSize;
+        }
+        if (cli.levelSetCoarseGuardBand <= 0.0f) {
+            cli.levelSetCoarseGuardBand =
+                std::max(0.5f * raw.meta.voxelSize, cli.levelSetSurfaceBand * 0.5f);
+        }
+        if (cli.levelSetTemporalBand <= 0.0f) {
+            cli.levelSetTemporalBand = 0.1f * raw.meta.voxelSize;
+        }
+    }
     const int frames = raw.meta.frames;
     const int leafCountX = (raw.meta.width + kLeafSize - 1) / kLeafSize;
     const int leafCountY = (raw.meta.height + kLeafSize - 1) / kLeafSize;
@@ -397,12 +434,26 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     temporalProfile.renderCutoff = cli.cutoff;
     temporalProfile.cutoffBand = cli.cutoffBand;
     temporalProfile.cutoffTemporalProtect = cli.cutoffProtect;
+    temporalProfile.isoSurfaceProtect = cli.levelSetSurfaceMode;
+    temporalProfile.isoValue = 0.0f;
+    temporalProfile.isoBand = cli.levelSetTemporalBand;
     DensityTemporalProfile controlProfile = temporalProfile;
     controlProfile.epsAbs *= std::max(1.0f, cli.controlEpsScale);
     controlProfile.epsRel *= std::max(1.0f, cli.controlEpsScale);
+    controlProfile.isoSurfaceProtect = false;
     const double bgThreshold = cli.cutoff > 0.0f ? static_cast<double>(cli.bgZeroRatio * cli.cutoff) : -1.0;
 
-    const std::vector<RenderTemporalVariantSpec> variantSpecs = buildRenderTemporalFormalProbeVariants();
+    std::vector<RenderTemporalVariantSpec> variantSpecs = buildRenderTemporalFormalProbeVariants();
+    if (cli.finalOnly) {
+        variantSpecs.erase(
+            std::remove_if(
+                variantSpecs.begin(),
+                variantSpecs.end(),
+                [](const RenderTemporalVariantSpec& spec) {
+                    return spec.name != "coarse_only" && spec.name != "fine6_full" && !spec.routeSelect;
+                }),
+            variantSpecs.end());
+    }
     const size_t baseVariantCount = variantSpecs.size();
     std::vector<VariantResult> variants;
     variants.reserve(baseVariantCount + 3);
@@ -415,7 +466,9 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     }
     variants.push_back({"fine6_full_packed", 6, totalLeafCount});
     variants.push_back({"shellvoxel35_packed", 0, totalLeafCount});
-    variants.push_back({"routed_empty_grid4_fine6_packed", 6, totalLeafCount});
+    const std::string routedPackedVariantName =
+        cli.levelSetSurfaceMode ? "levelset_surface_packed" : "routed_empty_grid4_fine6_packed";
+    variants.push_back({routedPackedVariantName, cli.levelSetSurfaceMode ? 0 : 6, totalLeafCount});
     const size_t packedFine6VariantIndex = baseVariantCount;
     const size_t packedShellVoxelVariantIndex = baseVariantCount + 1;
     const size_t packedRoutedVariantIndex = baseVariantCount + 2;
@@ -425,7 +478,8 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
             throw std::runtime_error("export-frame must be within [0, frames)");
         }
         if (cli.exportVariantName.empty()) {
-            cli.exportVariantName = "routed_empty_grid4_fine6";
+            cli.exportVariantName =
+                cli.levelSetSurfaceMode ? routedPackedVariantName : "routed_empty_grid4_fine6";
         }
         for (size_t i = 0; i < variants.size(); ++i) {
             if (variants[i].name == cli.exportVariantName) {
@@ -466,12 +520,16 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     routeOptions.coarseShellPeakThreshold = cli.routeCoarseShellPeakThr;
     routeOptions.shellGainThreshold = cli.routeShellGainThr;
 
+    std::atomic<bool> workerFailed{false};
+    std::string workerError;
+
 #ifdef VBT_USE_OPENMP
 #pragma omp parallel
 #endif
     {
         std::vector<float> voxelSeries(static_cast<size_t>(frames), 0.0f);
         std::vector<float> voxelRecon;
+        std::vector<float> levelSetTruthSeries(static_cast<size_t>(frames), 0.0f);
         std::vector<float> leafTemporal(static_cast<size_t>(kLeafVoxelCount) * static_cast<size_t>(frames), 0.0f);
         std::vector<float> coarseGrid(static_cast<size_t>(kCoarseRes * kCoarseRes * kCoarseRes * frames), 0.0f);
         std::vector<float> fine6Grid(static_cast<size_t>(6 * 6 * 6 * frames), 0.0f);
@@ -500,8 +558,14 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
 #pragma omp for schedule(dynamic, 2)
 #endif
         for (int bz = 0; bz < leafCountZ; ++bz) {
+            if (workerFailed.load(std::memory_order_relaxed)) continue;
+            int currentBx = -1;
+            int currentBy = -1;
+            try {
             for (int by = 0; by < leafCountY; ++by) {
+                currentBy = by;
                 for (int bx = 0; bx < leafCountX; ++bx) {
+                    currentBx = bx;
                     const uint64_t leafLinearIndex =
                         (static_cast<uint64_t>(bz) * static_cast<uint64_t>(leafCountY) +
                          static_cast<uint64_t>(by)) *
@@ -846,7 +910,26 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                                     bool active = false;
                                     for (int t = 0; t < frames; ++t) {
                                         const float truth = leafTemporalAt(leafTemporal, voxelIdx, frames, t);
-                                        if (truth >= shellVoxelCut) {
+                                        if (cli.levelSetSurfaceMode) {
+                                            const float coarse = sampleControlGridValue(
+                                                coarseGrid,
+                                                kCoarseRes,
+                                                frames,
+                                                t,
+                                                leafWidth,
+                                                leafHeight,
+                                                leafDepth,
+                                                static_cast<float>(lx),
+                                                static_cast<float>(ly),
+                                                static_cast<float>(lz));
+                                            const bool signMismatch = (truth >= 0.0f) != (coarse >= 0.0f);
+                                            if (std::abs(truth) <= cli.levelSetSurfaceBand ||
+                                                std::abs(coarse) <= cli.levelSetCoarseGuardBand ||
+                                                signMismatch) {
+                                                active = true;
+                                                break;
+                                            }
+                                        } else if (truth >= shellVoxelCut) {
                                             active = true;
                                             break;
                                         }
@@ -854,13 +937,24 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                                     if (!active) continue;
                                     word |= (1ull << bit);
                                     for (int t = 0; t < frames; ++t) {
+                                        const float truth = leafTemporalAt(leafTemporal, voxelIdx, frames, t);
                                         const float coarse =
                                             sampleControlGridValue(coarseGrid, kCoarseRes, frames, t, leafWidth, leafHeight, leafDepth,
                                                                    static_cast<float>(lx), static_cast<float>(ly), static_cast<float>(lz));
                                         voxelSeries[static_cast<size_t>(t)] =
-                                            leafTemporalAt(leafTemporal, voxelIdx, frames, t) - coarse;
+                                            truth - coarse;
+                                        if (cli.levelSetSurfaceMode) {
+                                            levelSetTruthSeries[static_cast<size_t>(t)] = truth;
+                                        }
                                     }
-                                    const auto keys = detectDensityKeyFrames(voxelSeries, controlProfile, nullptr);
+                                    auto keys = detectDensityKeyFrames(voxelSeries, controlProfile, nullptr);
+                                    if (cli.levelSetSurfaceMode) {
+                                        addIsoSurfaceKeyFrames(
+                                            levelSetTruthSeries,
+                                            0.0f,
+                                            cli.levelSetTemporalBand,
+                                            keys);
+                                    }
                                     leafShellVoxelKf += static_cast<uint64_t>(keys.size());
                                     reconstructFromKeys(voxelSeries, keys, voxelRecon);
                                     for (int t = 0; t < frames; ++t) {
@@ -1081,7 +1175,12 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                             routedMetrics.shellVoxelPeak = shellVoxelPeak;
                         }
                     }
-                    const auto routedMode = routeRenderTemporalLeaf(emptyLeaf, routedMetrics, routeOptions);
+                    const auto routedMode =
+                        cli.levelSetSurfaceMode
+                            ? (hasShellVoxel
+                                   ? RenderTemporalFormalMode::FINE_COMPACT
+                                   : RenderTemporalFormalMode::COARSE_ONLY)
+                            : routeRenderTemporalLeaf(emptyLeaf, routedMetrics, routeOptions);
 
                     std::vector<uint8_t> packedFine6LeafBytes;
                     std::vector<uint8_t> packedShellVoxelLeafBytes;
@@ -1130,7 +1229,10 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                         std::vector<uint8_t> shellOccupancyBytes;
                         std::vector<uint8_t> shellResidualBytes;
                         auto shellPackedData = shellVoxelPackedStream.data;
-                        if (hasShellVoxel && shellPackedData.controlCount > 0) {
+                        const bool shellPayloadFits =
+                            coarsePackedStream.data.keyframes.size() <= std::numeric_limits<uint16_t>::max() &&
+                            shellPackedData.keyframes.size() <= std::numeric_limits<uint16_t>::max();
+                        if (hasShellVoxel && shellPackedData.controlCount > 0 && shellPayloadFits) {
                             shellPackedData.codec = cli.packedCodec;
                             shellPackedData.maxBinLocalKeys = shellVoxelPackedStream.requiredMaxBinLocalKeys;
                             shellOccupancyBytes = packRenderTemporalShellOccupancySection(shellVoxelOccupancy);
@@ -1161,7 +1263,8 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
 
                         {
                             RenderTemporalPackedHeaderFields header;
-                            const bool useShellMode = hasShellVoxel && shellPackedData.controlCount > 0;
+                            const bool useShellMode =
+                                hasShellVoxel && shellPackedData.controlCount > 0 && shellPayloadFits;
                             header.mode = useShellMode ? TemporalFirstPackedMode::TEMPORAL_FINE_COMPACT
                                                        : TemporalFirstPackedMode::TEMPORAL_GRID4;
                             header.coarseCodec = coarsePackedData.codec;
@@ -1199,6 +1302,14 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                                 packedRoutedLeafBytes =
                                     buildRenderTemporalPackedLeafBytes(header, {}, {}, {}, true);
                             } else if (routedMode == RenderTemporalFormalMode::FINE_COMPACT) {
+                                if (!shellPayloadFits) {
+                                    throw std::runtime_error(
+                                        "Mode2 keyframe count exceeds VBTPACK4 uint16 capacity: coarse=" +
+                                        std::to_string(coarsePackedStream.data.keyframes.size()) +
+                                        ", surface=" + std::to_string(shellPackedData.keyframes.size()) +
+                                        ", limit=" +
+                                        std::to_string(std::numeric_limits<uint16_t>::max()));
+                                }
                                 const bool useShellMode = hasShellVoxel && shellPackedData.controlCount > 0;
                                 header.mode = useShellMode ? TemporalFirstPackedMode::TEMPORAL_FINE_COMPACT
                                                            : TemporalFirstPackedMode::TEMPORAL_GRID4;
@@ -1587,6 +1698,31 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                     }
                 }
             }
+            } catch (const std::exception& ex) {
+#ifdef VBT_USE_OPENMP
+#pragma omp critical(render_temporal_worker_error)
+#endif
+                {
+                    if (workerError.empty()) {
+                        workerError = "Render-temporal leaf (" + std::to_string(currentBx) + "," +
+                                      std::to_string(currentBy) + "," + std::to_string(bz) +
+                                      ") failed: " + ex.what();
+                    }
+                }
+                workerFailed.store(true, std::memory_order_relaxed);
+            } catch (...) {
+#ifdef VBT_USE_OPENMP
+#pragma omp critical(render_temporal_worker_error)
+#endif
+                {
+                    if (workerError.empty()) {
+                        workerError = "Render-temporal leaf (" + std::to_string(currentBx) + "," +
+                                      std::to_string(currentBy) + "," + std::to_string(bz) +
+                                      ") failed with an unknown exception";
+                    }
+                }
+                workerFailed.store(true, std::memory_order_relaxed);
+            }
         }
 
 #ifdef VBT_USE_OPENMP
@@ -1610,15 +1746,18 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
         }
     }
 
+    if (workerFailed.load(std::memory_order_relaxed)) {
+        throw std::runtime_error(workerError.empty() ? "Render-temporal worker failed" : workerError);
+    }
+
     temporalStats.voxelCount = static_cast<uint64_t>(raw.frameVoxelCount());
     temporalStats.rmse = std::sqrt(temporalStats.rmse / std::max(1.0, static_cast<double>(raw.totalVoxelCount())));
     temporalStats.psnr = computePsnr(temporalStats.rmse, peak);
-    for (auto& variant : variants) {
+    for (size_t vi = 0; vi < variants.size(); ++vi) {
+        auto& variant = variants[vi];
         variant.rmse = std::sqrt(variant.rmse / std::max(1.0, static_cast<double>(variant.samples)));
         variant.psnr = computePsnr(variant.rmse, peak);
-        if (variant.name != "fine6_full_packed" &&
-            variant.name != "shellvoxel35_packed" &&
-            variant.name != "routed_empty_grid4_fine6_packed") {
+        if (vi < baseVariantCount) {
             variant.estimatedBytes = variant.leafCount * 4ull + variant.coarseKeyframes * 3ull + variant.fineKeyframes * 3ull;
         }
     }
@@ -1695,12 +1834,17 @@ int main(int argc, char** argv)
             else if (codec == "fp32") cli.packedCodec = RenderTemporalSequenceCodec::DP_KEYFRAME_FP32;
             else throw std::runtime_error("packed-keyframe-codec must be fp16 or fp32");
         }
+        else if (arg == "--final-only") cli.finalOnly = true;
         else if (arg == "--route-empty-visible-thr" && i + 1 < argc) cli.routeEmptyVisibleThr = std::stof(argv[++i]);
         else if (arg == "--route-fine-visible-thr" && i + 1 < argc) cli.routeFineVisibleThr = std::stof(argv[++i]);
         else if (arg == "--route-fine-band-thr" && i + 1 < argc) cli.routeFineBandThr = std::stof(argv[++i]);
         else if (arg == "--route-coarse-rmse-thr" && i + 1 < argc) cli.routeCoarseRmseThr = std::stof(argv[++i]);
         else if (arg == "--route-coarse-peak-thr" && i + 1 < argc) cli.routeCoarsePeakThr = std::stof(argv[++i]);
         else if (arg == "--route-fine-gain-thr" && i + 1 < argc) cli.routeFineGainThr = std::stof(argv[++i]);
+        else if (arg == "--levelset-surface-band" && i + 1 < argc) cli.levelSetSurfaceBand = std::stof(argv[++i]);
+        else if (arg == "--levelset-coarse-guard-band" && i + 1 < argc) cli.levelSetCoarseGuardBand = std::stof(argv[++i]);
+        else if (arg == "--levelset-temporal-band" && i + 1 < argc) cli.levelSetTemporalBand = std::stof(argv[++i]);
+        else if (arg == "--legacy-levelset-route") cli.legacyLevelSetRoute = true;
         else if (arg == "--cutoff-protect") cli.cutoffProtect = true;
         else if (arg == "--no-cutoff-protect") cli.cutoffProtect = false;
         else if (arg == "--omp-threads" && i + 1 < argc) cli.ompThreads = std::stoi(argv[++i]);
@@ -1752,6 +1896,13 @@ int runRenderTemporalMainline(const std::filesystem::path& inputRaw,
     cli.ompThreads = options.ompThreads;
     cli.packedCodec = RenderTemporalSequenceCodec::DP_KEYFRAME_FP16;
     cli.controlEpsScale = makeRenderTemporalFormalDefaults().controlEpsScale;
+    if (meta.conversionMode == "levelset") {
+        cli.cutoff = 0.0f;
+        cli.cutoffBand = 0.0f;
+        cli.cutoffProtect = false;
+        cli.levelSetSurfaceBand =
+            (meta.shellWidthVoxels > 0.0f ? meta.shellWidthVoxels : 1.5f) * meta.voxelSize;
+    }
 
     const auto routeDefaults = makeRenderTemporalRouteDefaults(cli.cutoff, cli.cutoffBand, cli.bgZeroRatio);
     cli.routeEmptyVisibleThr = routeDefaults.emptyVisibleFracThreshold;
@@ -1784,6 +1935,35 @@ int runRenderTemporalMainline(const std::filesystem::path& inputRaw,
 
 namespace {
 
+void addIsoSurfaceKeyFrames(const std::vector<float>& values,
+                           float isoValue,
+                           float isoBand,
+                           std::vector<int>& keys)
+{
+    if (values.empty()) return;
+    const float band = std::max(0.0f, isoBand);
+    auto addWithNeighbors = [&](int t) {
+        if (t > 0) keys.push_back(t - 1);
+        keys.push_back(t);
+        if (t + 1 < static_cast<int>(values.size())) keys.push_back(t + 1);
+    };
+    for (int t = 0; t < static_cast<int>(values.size()); ++t) {
+        const float current = values[static_cast<size_t>(t)] - isoValue;
+        if (std::abs(current) <= band) {
+            addWithNeighbors(t);
+        }
+        if (t > 0) {
+            const float previous = values[static_cast<size_t>(t - 1)] - isoValue;
+            if ((previous >= 0.0f) != (current >= 0.0f)) {
+                addWithNeighbors(t - 1);
+                addWithNeighbors(t);
+            }
+        }
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+}
+
 std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
                                         const DensityTemporalProfile& profile,
                                         bool* usedCutoffProtect)
@@ -1810,8 +1990,8 @@ std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
     std::vector<int> keys{0, n - 1};
     dpRecurse(values, 0, n - 1, profile, stats, keys);
 
+    bool protectedKeysAdded = false;
     if (profile.cutoffTemporalProtect && profile.renderCutoff > 0.0f && profile.cutoffBand >= 0.0f) {
-        bool added = false;
         const float cutoff = profile.renderCutoff;
         const float band = profile.cutoffBand;
         for (int t = 0; t < n; ++t) {
@@ -1820,7 +2000,7 @@ std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
                 keys.push_back(t);
                 if (t > 0) keys.push_back(t - 1);
                 if (t + 1 < n) keys.push_back(t + 1);
-                added = true;
+                protectedKeysAdded = true;
             }
             if (t > 0) {
                 const int prev = cutoffState(values[static_cast<size_t>(t - 1)], cutoff, band);
@@ -1828,15 +2008,20 @@ std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
                     keys.push_back(t - 1);
                     keys.push_back(t);
                     if (t + 1 < n) keys.push_back(t + 1);
-                    added = true;
+                    protectedKeysAdded = true;
                 }
             }
         }
-        if (usedCutoffProtect) *usedCutoffProtect = added;
+    }
+    if (profile.isoSurfaceProtect) {
+        const size_t keyCountBefore = keys.size();
+        addIsoSurfaceKeyFrames(values, profile.isoValue, profile.isoBand, keys);
+        protectedKeysAdded = protectedKeysAdded || keys.size() > keyCountBefore;
     }
 
     std::sort(keys.begin(), keys.end());
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    if (usedCutoffProtect) *usedCutoffProtect = protectedKeysAdded;
     return keys;
 }
 
@@ -2144,6 +2329,7 @@ void writeReport(const std::filesystem::path& path,
     out << "- cutoff band: `" << cli.cutoffBand << "`\n";
     out << "- temporal eps abs/rel: `" << cli.temporalEpsAbs << " / " << cli.temporalEpsRel << "`\n";
     out << "- control eps scale: `" << cli.controlEpsScale << "`\n";
+    out << "- final-only variants: `" << (cli.finalOnly ? "true" : "false") << "`\n";
     out << "- temporal gamma delta: `" << cli.temporalGammaDelta << "`\n";
     out << "- bg zero ratio: `" << cli.bgZeroRatio << "`\n";
     out << "- route empty visible threshold: `" << cli.routeEmptyVisibleThr << "`\n";
@@ -2153,6 +2339,12 @@ void writeReport(const std::filesystem::path& path,
     out << "- route coarse peak threshold: `" << cli.routeCoarsePeakThr << "`\n";
     out << "- route fine gain threshold: `" << cli.routeFineGainThr << "`\n";
     out << "- cutoff protect: `" << (cli.cutoffProtect ? "true" : "false") << "`\n";
+    out << "- level-set surface mode: `" << (cli.levelSetSurfaceMode ? "true" : "false") << "`\n";
+    if (cli.levelSetSurfaceMode) {
+        out << "- level-set surface band: `" << cli.levelSetSurfaceBand << "`\n";
+        out << "- level-set coarse guard band: `" << cli.levelSetCoarseGuardBand << "`\n";
+        out << "- level-set temporal protect band: `" << cli.levelSetTemporalBand << "`\n";
+    }
     if (!cli.saveVbtPath.empty()) {
         out << "- saved probe file: `" << cli.saveVbtPath.string() << "`\n";
         out << "- saved probe bytes: `" << cli.savedFileBytes << "`\n";

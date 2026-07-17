@@ -62,12 +62,24 @@ struct RenderTemporalPackedLeafView {
     RenderTemporalPackedHeaderFields header;
     RenderTemporalPackedLeafPrefix prefix;
     RenderTemporalPackedLeafLayout layout;
+    uint16_t shellActiveVoxelCount = 0;
+    uint32_t shellResidualOffset = 0;
+    uint32_t shellResidualBytes = 0;
 };
 
 constexpr uint32_t kRenderTemporalHeaderBytes = 4;
 constexpr uint32_t kRenderTemporalControlDescriptorBytes = 4;
 constexpr uint8_t kRenderTemporalPackedTimeBinCount = 8;
 constexpr uint8_t kRenderTemporalShellPackedTimeBinCount = 4;
+constexpr uint16_t kRenderTemporalLeafSize = 8;
+
+constexpr uint16_t renderTemporalLeafVoxelIndex(uint16_t lx,
+                                                uint16_t ly,
+                                                uint16_t lz,
+                                                uint16_t leafSize = kRenderTemporalLeafSize)
+{
+    return static_cast<uint16_t>((lz * leafSize + ly) * leafSize + lx);
+}
 
 // Shell occupancy section for Mode2 = TemporalShellVoxel (liquid shell mode).
 // Doc: VBT/实现策略/liquid_shell_packed_mode_design_2026-04-08.md section 7.2.

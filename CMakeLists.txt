@@ -1,13 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
-project(VBTMainline LANGUAGES CXX)
+project(VBTSpatialFirst LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(VBT_BUILD_RENDER_TOOLS "Build Vulkan-based render/query tools" ON)
+option(BUILD_VBT_RENDER "Build VBT render/query benchmark workspace" OFF)
+option(VBT_BUILD_RENDER_TOOLS "Build VBT render/query benchmark workspace" OFF)
 option(VBT_BUILD_CYCLES_NATIVE_STAGING "Build native Cycles staging probe" ON)
-option(VBT_BUILD_BLENDER_BRIDGE_TOOLS "Build optional Blender bridge helper tools" OFF)
+option(VBT_BUILD_BLENDER_BRIDGE_TOOLS "Build Blender bridge helper tools" OFF)
+
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann")
 
 add_executable(vbt_spatialfirst_probe
     src/main.cpp
@@ -39,19 +42,48 @@ add_executable(vbt_render_temporal_kf_probe
 )
 
 target_include_directories(vbt_render_temporal_kf_probe PRIVATE src)
-target_compile_definitions(vbt_render_temporal_kf_probe PRIVATE
-    VBT_RENDER_TEMPORAL_PROBE_STANDALONE=1
-)
+target_compile_definitions(vbt_render_temporal_kf_probe PRIVATE VBT_RENDER_TEMPORAL_PROBE_STANDALONE=1)
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
-    foreach(target vbt_spatialfirst_probe vbt_render_temporal_kf_probe)
-        target_link_libraries(${target} PRIVATE OpenMP::OpenMP_CXX)
-        target_compile_definitions(${target} PRIVATE VBT_USE_OPENMP=1)
-    endforeach()
+    target_link_libraries(vbt_spatialfirst_probe PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(vbt_spatialfirst_probe PRIVATE VBT_USE_OPENMP=1)
+    target_link_libraries(vbt_render_temporal_kf_probe PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(vbt_render_temporal_kf_probe PRIVATE VBT_USE_OPENMP=1)
 endif()
 
-if(VBT_BUILD_RENDER_TOOLS)
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(vbt_raw_volume_tests
+        tests/raw_volume_tests.cpp
+        src/raw_volume.cpp
+    )
+    target_include_directories(vbt_raw_volume_tests PRIVATE src)
+    add_test(NAME vbt_raw_volume_tests COMMAND vbt_raw_volume_tests)
+
+    add_executable(vbt_file_tests
+        tests/vbt_file_tests.cpp
+        render/src/vbt_file.cpp
+    )
+    target_include_directories(vbt_file_tests PRIVATE render/src)
+    add_test(NAME vbt_file_tests COMMAND vbt_file_tests)
+
+    add_executable(vbt_render_temporal_payload_tests
+        tests/render_temporal_payload_tests.cpp
+        src/render_temporal_payload.cpp
+    )
+    target_include_directories(vbt_render_temporal_payload_tests PRIVATE src)
+    add_test(NAME vbt_render_temporal_payload_tests COMMAND vbt_render_temporal_payload_tests)
+
+    add_executable(vbt_cycles_loader_tests
+        tests/vbt_cycles_loader_tests.cpp
+        cycles_native_vbt/vbt_cycles_loader.cpp
+    )
+    target_include_directories(vbt_cycles_loader_tests PRIVATE cycles_native_vbt)
+    add_test(NAME vbt_cycles_loader_tests COMMAND vbt_cycles_loader_tests)
+endif()
+
+if(BUILD_VBT_RENDER OR VBT_BUILD_RENDER_TOOLS)
     add_subdirectory(render)
 endif()
 

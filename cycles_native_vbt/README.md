@@ -2,17 +2,21 @@
 
 This directory is the staging area for the native `.vbtp` path inside Cycles.
 
-It is intentionally separate from `../blender_bridge/`. The bridge path imports
-one frame through an OpenVDB proxy; the native path keeps VBT payloads resident
-and samples them directly in the Cycles volume kernel.
+It is intentionally separate from `blender_bridge/`. The existing bridge converts
+VBT frames to cached OpenVDB proxies and lets Blender/Cycles render those proxies.
+That is useful as a DCC workflow bridge, but it is not a native Cycles backend.
+
+The native target is different: Cycles keeps a VBT payload resident on the
+device and samples it directly from the volume kernel, without generating
+OpenVDB or NanoVDB intermediates.
 
 Current status:
 
-- Blender/Cycles sparse checkout: `external/blender` at commit
-  `940972dfaa708826f3d16709d8d54ae61d32f5a5`.
-- Native Cycles MVP patch started in `external/blender/intern/cycles`: `.vbtp`
-  Volume paths are routed to a resident VBT density image blob and sampled in
-  `kernel/util/vbt.h` from `kernel/util/image_3d.h`.
+- The Blender/Cycles patch targets commit
+  `940972dfaa708826f3d16709d8d54ae61d32f5a5` and is stored in
+  `../blender_patch/native_cycles_vbt.patch`.
+- The patch routes `.vbtp` Volume paths to a resident VBT density image blob and
+  samples it in `kernel/util/vbt.h` from `kernel/util/image_3d.h`.
 - `vbt_cycles_sampler.h`: first standalone device-style sampler for render VBT
   payloads. It covers the main-paper render modes: Empty, TemporalGrid4, and
   TemporalFine6. Tag 2 remains reserved for the compact shell route and is not
@@ -27,7 +31,8 @@ Current status:
   that points a Volume datablock directly at a `.vbtp` file.
 - `TODO.md`: implementation plan and current progress for the Blender/Cycles fork.
 
-The Blender-side patch itself is stored in `../blender_patch/native_cycles_vbt.patch`.
+The current native patch is a CPU/CUDA prototype. It avoids `.vdb` proxy
+generation, but final image parity and performance validation remain open.
 
 ## Local Probe
 
@@ -40,7 +45,8 @@ cmake --build build --config Release --target vbt_sampler_cpu_probe
 
 ## Native Scene Smoke Test
 
-After building Blender from the patched source checkout:
+After applying `../blender_patch/native_cycles_vbt.patch` to the recorded Blender
+commit and building Blender:
 
 ```powershell
 blender --background --python cycles_native_vbt/create_native_vbt_scene.py -- `

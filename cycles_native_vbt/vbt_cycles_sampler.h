@@ -235,8 +235,30 @@ VBT_CYCLES_DEVICE float decode_temporal_control_value(const uint32_t *payload,
         ++curr_local;
     }
 
-    uint32_t last_frame = 0u;
-    return read_keyframe_value(payload, key_base, codec, key_start + key_count - 1u, &last_frame);
+    curr_local = curr_local < static_cast<int>(key_count) ? curr_local : static_cast<int>(key_count) - 1;
+    uint32_t curr_frame = 0u;
+    const float curr_value = read_keyframe_value(payload,
+                                                 key_base,
+                                                 codec,
+                                                 key_start + static_cast<uint32_t>(curr_local),
+                                                 &curr_frame);
+    if (static_cast<int>(curr_frame) <= clamped_frame || curr_local == prev_local) {
+        return curr_value;
+    }
+
+    uint32_t prev_frame = 0u;
+    const float prev_value = read_keyframe_value(payload,
+                                                 key_base,
+                                                 codec,
+                                                 key_start + static_cast<uint32_t>(prev_local),
+                                                 &prev_frame);
+    const int f0 = static_cast<int>(prev_frame);
+    const int f1 = static_cast<int>(curr_frame);
+    if (f1 <= f0) {
+        return prev_value;
+    }
+    const float alpha = static_cast<float>(clamped_frame - f0) / static_cast<float>(f1 - f0);
+    return mix_f32(prev_value, curr_value, alpha);
 }
 
 VBT_CYCLES_DEVICE float control_coord(uint32_t index, uint32_t resolution)

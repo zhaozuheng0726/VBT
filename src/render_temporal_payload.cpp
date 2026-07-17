@@ -256,6 +256,57 @@ RenderTemporalPackedLeafView parseRenderTemporalPackedLeaf(const uint8_t* leafBa
     if (out.layout.totalBytes > leafBytes) {
         throw std::runtime_error("render temporal leaf shorter than computed layout");
     }
+    if (out.header.mode == TemporalFirstPackedMode::TEMPORAL_FINE_COMPACT) {
+        const size_t occupancyOffset = out.layout.fine.descriptorOffset;
+        const size_t occupancyBytes = out.layout.fine.descriptorBytes;
+        if (occupancyBytes != sizeof(RenderTemporalShellOccupancySection) ||
+            occupancyOffset > leafBytes ||
+            occupancyBytes > leafBytes - occupancyOffset) {
+            throw std::runtime_error("render temporal shell occupancy is out of bounds");
+        }
+
+        const auto section =
+            unpackRenderTemporalShellOccupancySection(leafBase + occupancyOffset, occupancyBytes);
+        uint16_t expectedPrefix = 0;
+        for (size_t group = 0; group < section.shellMask.size(); ++group) {
+            if (section.groupPrefix[group] != expectedPrefix) {
+                throw std::runtime_error("render temporal shell group prefix is inconsistent");
+            }
+            for (uint64_t word = section.shellMask[group]; word != 0u; word &= (word - 1u)) {
+                expectedPrefix += 1u;
+            }
+        }
+        if (expectedPrefix == 0u) {
+            throw std::runtime_error("render temporal shell mode contains no active voxels");
+        }
+
+        size_t residualOffset = occupancyOffset + occupancyBytes;
+        if (alignTo4Bytes) {
+            residualOffset = (residualOffset + 3u) & ~size_t{3u};
+        }
+        const size_t descriptorBytes =
+            static_cast<size_t>(expectedPrefix) * kRenderTemporalControlDescriptorBytes;
+        size_t binIndexBytes =
+            static_cast<size_t>(expectedPrefix) * kRenderTemporalShellPackedTimeBinCount;
+        size_t keyframeBytes =
+            static_cast<size_t>(out.prefix.fineKeyframeCount) *
+            renderTemporalKeyframeBytes(out.header.fineCodec);
+        if (alignTo4Bytes) {
+            binIndexBytes = (binIndexBytes + 3u) & ~size_t{3u};
+            keyframeBytes = (keyframeBytes + 3u) & ~size_t{3u};
+        }
+        const size_t residualBytes = descriptorBytes + binIndexBytes + keyframeBytes;
+        if (residualOffset > leafBytes || residualBytes > leafBytes - residualOffset) {
+            throw std::runtime_error("render temporal shell residual stream is out of bounds");
+        }
+        if (residualOffset + residualBytes != leafBytes) {
+            throw std::runtime_error("render temporal shell leaf contains trailing bytes");
+        }
+
+        out.shellActiveVoxelCount = expectedPrefix;
+        out.shellResidualOffset = static_cast<uint32_t>(residualOffset);
+        out.shellResidualBytes = static_cast<uint32_t>(residualBytes);
+    }
     return out;
 }
 

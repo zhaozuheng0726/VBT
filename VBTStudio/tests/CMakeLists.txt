@@ -1,0 +1,6 @@
+add_executable(vbtstudio_backend_tests
+  backend_tests.cpp
+)
+
+target_link_libraries(vbtstudio_backend_tests PRIVATE vbtstudio_backend)
+add_test(NAME vbtstudio_backend_tests COMMAND vbtstudio_backend_tests)

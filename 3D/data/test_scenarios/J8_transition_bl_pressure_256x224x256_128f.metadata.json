@@ -1,0 +1,51 @@
+{
+  "dataset_name": "transition_bl",
+  "variable": "pressure",
+  "component": null,
+  "component_name": null,
+  "dimensions": [
+    256,
+    224,
+    256,
+    128
+  ],
+  "axis_order": [
+    "X",
+    "Y",
+    "Z",
+    "T"
+  ],
+  "time_is_fastest_dimension": true,
+  "data_type": "float32",
+  "file_name": "J8_transition_bl_pressure_256x224x256_128f.raw",
+  "global_min": -0.057545099407434464,
+  "global_max": 0.03850293159484863,
+  "normalization": null,
+  "source_indexing": {
+    "api_is_1_based": true,
+    "requested_start_0_based": {
+      "x": 1532,
+      "y": 0,
+      "z": 896,
+      "t": 0
+    },
+    "actual_api_ranges_inclusive": {
+      "x": [
+        1533,
+        1788
+      ],
+      "y": [
+        1,
+        224
+      ],
+      "z": [
+        897,
+        1152
+      ],
+      "t": [
+        1,
+        128
+      ]
+    }
+  }
+}
