@@ -10,9 +10,10 @@ data/
   fluid/   quality 0.5 and performance 0.75 Mode2 level sets
 ```
 
-The local files are NTFS hard links to the canonical final outputs. They do not
-copy the multi-gigabyte payloads. `catalog.json` records every canonical path
-and verifies that each entry points to the same physical file.
+The files under `data/` are the canonical final compressed assets. Runtime use
+does not depend on dated campaign directories under `outputs/`. Density assets
+shared by smoke and fire may still be NTFS hard links to avoid duplicate bytes,
+but every canonical path is inside this directory.
 
 ## VBT Studio
 
@@ -34,7 +35,7 @@ Source data remains separate from compressed runtime assets:
 3D/data/fluid/source/  water Alembic and Blender source assets
 ```
 
-Rebuild or verify this catalog with:
+Rebuild or verify `catalog.json` against the canonical files with:
 
 ```powershell
 python scripts/build_data_library.py

@@ -1,12 +1,12 @@
 {
-  "format": "vbt_data_library_v1",
+  "format": "vbt_data_library_v2",
   "asset_count": 14,
   "categories": [
     "smoke",
     "fire",
     "fluid"
   ],
-  "storage": "NTFS hard links; no VBT payload bytes are duplicated",
+  "storage": "canonical final compressed assets under data/",
   "source_data": {
     "smoke_and_fire_vdb": "3D/data/smoke",
     "fluid_source": "3D/data/fluid/source"
@@ -18,11 +18,14 @@
       "field": "density",
       "vbt": "data/smoke/industrial_chimney/industrial_chimney_density.vbtp",
       "metadata": "data/smoke/industrial_chimney/industrial_chimney_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/industrial_chimney/industrial_chimney_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/industrial_chimney/industrial_chimney_density.metadata.json",
       "bytes": 189808588,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        178,
+        510,
+        358,
+        250
+      ],
+      "status": "verified"
     },
     {
       "category": "smoke",
@@ -30,11 +33,14 @@
       "field": "density",
       "vbt": "data/smoke/tornado_looping/tornado_looping_density.vbtp",
       "metadata": "data/smoke/tornado_looping/tornado_looping_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/tornado_looping/tornado_looping_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/tornado_looping/tornado_looping_density.metadata.json",
       "bytes": 562708176,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        332,
+        335,
+        447,
+        128
+      ],
+      "status": "verified"
     },
     {
       "category": "smoke",
@@ -42,11 +48,14 @@
       "field": "density",
       "vbt": "data/smoke/dust_devil/dust_devil_density.vbtp",
       "metadata": "data/smoke/dust_devil/dust_devil_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/dust_devil/dust_devil_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/dust_devil/dust_devil_density.metadata.json",
       "bytes": 182981760,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        255,
+        255,
+        385,
+        101
+      ],
+      "status": "verified"
     },
     {
       "category": "smoke",
@@ -54,11 +63,14 @@
       "field": "density",
       "vbt": "data/smoke/ground_explosion/ground_explosion_density.vbtp",
       "metadata": "data/smoke/ground_explosion/ground_explosion_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/ground_explosion/ground_explosion_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/ground_explosion/ground_explosion_density.metadata.json",
       "bytes": 72428092,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        222,
+        257,
+        283,
+        200
+      ],
+      "status": "verified"
     },
     {
       "category": "smoke",
@@ -66,11 +78,14 @@
       "field": "density",
       "vbt": "data/smoke/smoke_plume/smoke_plume_density.vbtp",
       "metadata": "data/smoke/smoke_plume/smoke_plume_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/smoke_plume/smoke_plume_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/smoke_plume/smoke_plume_density.metadata.json",
       "bytes": 1211332156,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        287,
+        500,
+        319,
+        166
+      ],
+      "status": "verified"
     },
     {
       "category": "smoke",
@@ -78,11 +93,14 @@
       "field": "density",
       "vbt": "data/smoke/dust_shockwave/dust_shockwave_density.vbtp",
       "metadata": "data/smoke/dust_shockwave/dust_shockwave_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/dust_shockwave/dust_shockwave_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/dust_shockwave/dust_shockwave_density.metadata.json",
       "bytes": 4242479332,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        1124,
+        1097,
+        141,
+        155
+      ],
+      "status": "verified"
     },
     {
       "category": "smoke",
@@ -90,11 +108,14 @@
       "field": "density",
       "vbt": "data/smoke/aerial_explosion/aerial_explosion_density.vbtp",
       "metadata": "data/smoke/aerial_explosion/aerial_explosion_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/aerial_explosion/aerial_explosion_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/aerial_explosion/aerial_explosion_density.metadata.json",
       "bytes": 765128040,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        463,
+        493,
+        635,
+        120
+      ],
+      "status": "verified"
     },
     {
       "category": "fire",
@@ -102,11 +123,14 @@
       "field": "density",
       "vbt": "data/fire/ground_explosion/ground_explosion_density.vbtp",
       "metadata": "data/fire/ground_explosion/ground_explosion_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/ground_explosion/ground_explosion_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/ground_explosion/ground_explosion_density.metadata.json",
       "bytes": 72428092,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        222,
+        257,
+        283,
+        200
+      ],
+      "status": "verified"
     },
     {
       "category": "fire",
@@ -114,11 +138,14 @@
       "field": "flames",
       "vbt": "data/fire/ground_explosion/ground_explosion_flames.vbtp",
       "metadata": "data/fire/ground_explosion/ground_explosion_flames.metadata.json",
-      "canonical_vbt": "outputs/native_fire_campaign_20260714/ground_explosion/compressed/ground_explosion_flames.vbtp",
-      "canonical_metadata": "outputs/native_fire_campaign_20260714/ground_explosion/compressed/ground_explosion_flames.metadata.json",
       "bytes": 22897272,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        165,
+        182,
+        209,
+        200
+      ],
+      "status": "verified"
     },
     {
       "category": "fire",
@@ -126,11 +153,14 @@
       "field": "density",
       "vbt": "data/fire/aerial_explosion/aerial_explosion_density.vbtp",
       "metadata": "data/fire/aerial_explosion/aerial_explosion_density.metadata.json",
-      "canonical_vbt": "outputs/thesis_render_extension_20260711/aerial_explosion/aerial_explosion_density.vbtp",
-      "canonical_metadata": "outputs/thesis_render_extension_20260711/aerial_explosion/aerial_explosion_density.metadata.json",
       "bytes": 765128040,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        463,
+        493,
+        635,
+        120
+      ],
+      "status": "verified"
     },
     {
       "category": "fire",
@@ -138,11 +168,14 @@
       "field": "flames",
       "vbt": "data/fire/aerial_explosion/aerial_explosion_flames.vbtp",
       "metadata": "data/fire/aerial_explosion/aerial_explosion_flames.metadata.json",
-      "canonical_vbt": "outputs/native_fire_campaign_20260714/aerial_explosion/compressed/aerial_explosion_flames.vbtp",
-      "canonical_metadata": "outputs/native_fire_campaign_20260714/aerial_explosion/compressed/aerial_explosion_flames.metadata.json",
       "bytes": 231806076,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        431,
+        475,
+        586,
+        120
+      ],
+      "status": "verified"
     },
     {
       "category": "fire",
@@ -150,11 +183,14 @@
       "field": "temperature",
       "vbt": "data/fire/aerial_explosion/aerial_explosion_temperature.vbtp",
       "metadata": "data/fire/aerial_explosion/aerial_explosion_temperature.metadata.json",
-      "canonical_vbt": "outputs/native_fire_campaign_20260714/aerial_explosion/compressed/aerial_explosion_temperature.vbtp",
-      "canonical_metadata": "outputs/native_fire_campaign_20260714/aerial_explosion/compressed/aerial_explosion_temperature.metadata.json",
       "bytes": 598863084,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        463,
+        493,
+        635,
+        120
+      ],
+      "status": "verified"
     },
     {
       "category": "fluid",
@@ -162,11 +198,14 @@
       "field": "levelset",
       "vbt": "data/fluid/quality_0p5/water_flow_levelset_mode2.vbtp",
       "metadata": "data/fluid/quality_0p5/water_flow_levelset_mode2.metadata.json",
-      "canonical_vbt": "outputs/fluid_final_highres_20260715/quality_0p5/water_flow_levelset_mode2.vbtp",
-      "canonical_metadata": "outputs/fluid_final_highres_20260715/quality_0p5/water_flow_levelset.metadata.json",
       "bytes": 473139628,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        235,
+        368,
+        442,
+        144
+      ],
+      "status": "verified"
     },
     {
       "category": "fluid",
@@ -174,11 +213,14 @@
       "field": "levelset",
       "vbt": "data/fluid/performance_0p75/water_flow_levelset_mode2.vbtp",
       "metadata": "data/fluid/performance_0p75/water_flow_levelset_mode2.metadata.json",
-      "canonical_vbt": "outputs/fluid_final_highres_20260715/performance_0p75/water_flow_levelset_mode2.vbtp",
-      "canonical_metadata": "outputs/fluid_final_highres_20260715/performance_0p75/water_flow_levelset.metadata.json",
       "bytes": 184676628,
-      "hard_link_verified": true,
-      "status": "verified/verified"
+      "dimensions": [
+        159,
+        247,
+        296,
+        144
+      ],
+      "status": "verified"
     }
   ]
 }
