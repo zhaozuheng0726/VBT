@@ -4,7 +4,7 @@ VBT Studio is the Vulkan desktop renderer for dynamic `VBTPACK4` assets. It
 opens compressed density, flames, temperature, and Mode2 level-set fields
 directly without converting every frame to VDB.
 
-![Smoke, fire, and fluid modes](../docs/images/vbt_smoke_fire_fluid.png)
+![VBT Studio interface](../docs/images/vbtstudio_interface.png)
 
 ## Architecture
 
@@ -17,6 +17,10 @@ tests/     backend contract tests
 The frontend and backend are separate CMake targets in one process. This keeps
 the API boundary explicit without copying multi-gigabyte VBT payloads through
 IPC. `VBT_SOURCE_DIR` defaults to the parent repository.
+
+The interface exposes the loaded asset and aligned fields, dynamic viewport
+and timeline, material/camera controls, GPU timings, compact-cache memory, and
+deterministic frame/sequence export in one desktop engine.
 
 ## Features
 
@@ -46,6 +50,8 @@ A GPU-built active-leaf page table allocates full-float controls only for
 non-Mode0 leaves. The compact path produces byte-identical images to direct
 sampling while measuring 4.967x-10.035x speedups across the retained smoke,
 fire, and fluid contracts.
+
+![VBT Studio GPU performance](../docs/images/vbtstudio_gpu_performance.png)
 
 Level-set surface and shadow hits require a supported sign crossing with
 negative-side interior evidence. This rejects isolated coarse near-zero samples
@@ -106,6 +112,10 @@ Export an aligned sequence and timing CSV:
 Add `--export-video C:\path\to\sequence.mp4` for H.264 output through
 FFmpeg. Use `--timing-csv` to override the CSV path and `--ffmpeg` to select
 a specific executable.
+
+For deterministic automation or documentation capture, use
+`--inspector-tab material|render|camera|export` to select the initial Inspector
+panel.
 
 ## Runtime Data
 

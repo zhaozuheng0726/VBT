@@ -10,6 +10,9 @@ reports/
 VBTStudio/validation/
 VBTStudio/scripts/
 /list.md
+/vbtstudio_layout.ini
+scripts/finalize_thesis_package.py
+scripts/run_thesis_vbtstudio_contracts.py
 scripts/_gen_missing_tex.py
 scripts/build_*_paper_package.py
 scripts/build_thesis_*.py

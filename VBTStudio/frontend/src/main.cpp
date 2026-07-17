@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -51,6 +52,7 @@ VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 ImGui_ImplVulkanH_Window main_window;
 int min_image_count = 2;
 bool swapchain_rebuild = false;
+std::string inspector_tab_override;
 
 struct WindowPlacement {
     int width;
@@ -892,7 +894,10 @@ void draw_inspector(GLFWwindow* window,
     ImGui::Begin("Inspector");
     auto& material = session.material();
     if (ImGui::BeginTabBar("InspectorTabs")) {
-        if (ImGui::BeginTabItem("Material")) {
+        const auto tab_flags = [](const char* name) {
+            return inspector_tab_override == name ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+        };
+        if (ImGui::BeginTabItem("Material", nullptr, tab_flags("material"))) {
             ImGui::BeginDisabled(sequence.active);
             const bool level_set = session.asset() &&
                                    session.asset()->role == vbtstudio::backend::FieldRole::LevelSet;
@@ -964,7 +969,7 @@ void draw_inspector(GLFWwindow* window,
             ImGui::EndDisabled();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Render")) {
+        if (ImGui::BeginTabItem("Render", nullptr, tab_flags("render"))) {
             ImGui::BeginDisabled(sequence.active);
             int quality = material.sample_steps <= 160u ? 0 : (material.sample_steps <= 320u ? 1 : 2);
             if (ImGui::Combo("Quality", &quality, "Interactive\0Balanced\0Final Vulkan\0")) {
@@ -1023,7 +1028,7 @@ void draw_inspector(GLFWwindow* window,
             }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Camera")) {
+        if (ImGui::BeginTabItem("Camera", nullptr, tab_flags("camera"))) {
             ImGui::BeginDisabled(sequence.active);
             auto& camera = session.camera();
             ImGui::SliderAngle("Yaw", &camera.yaw, -180.0f, 180.0f);
@@ -1059,7 +1064,7 @@ void draw_inspector(GLFWwindow* window,
             ImGui::EndDisabled();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Export")) {
+        if (ImGui::BeginTabItem("Export", nullptr, tab_flags("export"))) {
             ImGui::TextDisabled("FORMAT");
             ImGui::Text("PNG RGBA 8-bit");
             ImGui::TextDisabled("CURRENT RESOLUTION");
@@ -1351,6 +1356,13 @@ int main(int argc, char** argv)
     const auto command_sequence_directory = command_line_path(argc, argv, "--export-sequence");
     const auto command_video = command_line_path(argc, argv, "--export-video");
     const auto command_single_export = command_line_export(argc, argv);
+    inspector_tab_override = command_line_string(argc, argv, "--inspector-tab").value_or("");
+    if (inspector_tab_override != "" && inspector_tab_override != "material" &&
+        inspector_tab_override != "render" && inspector_tab_override != "camera" &&
+        inspector_tab_override != "export") {
+        std::cerr << "Unknown --inspector-tab value: " << inspector_tab_override << "\n";
+        return 3;
+    }
     const bool batch_mode = command_single_export.has_value() || command_sequence_directory.has_value() ||
                             command_video.has_value();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);

@@ -1,0 +1,6 @@
+contract,frame,resolution,steps,direct_ms,fixed_cache_ms,compact_cache_ms,direct_to_compact_speedup,compact_fps,cache_vram_saved_percent,pixel_identical
+Industrial smoke,125,960x550,160,15.156992,3.907072,3.051392,4.967,327.72,72.9,true
+Ground Physical Fire,64,960x550,160,75.321184,7.806048,7.505600,10.035,133.23,62.1,true
+Aerial Physical Fire,60,960x550,160,100.580640,18.352768,16.915616,5.946,59.12,67.0,true
+Fluid performance Fast Surface,72,960x550,256,67.171904,8.878688,7.864576,8.541,127.15,0.0,true
+Fluid quality Fast Surface,72,960x550,320,86.722336,14.858112,14.572960,5.951,68.62,0.0,true

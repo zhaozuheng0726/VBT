@@ -1,0 +1,15 @@
+domain,dataset,field_or_profile,frame,compression_ratio,field_psnr_db,render_psnr_db,render_ssim,notes
+smoke,Industrial Chimney,density,125,171.2211,46.6543,39.7542,0.990404,charcoal aligned render
+smoke,Tornado Looping,density,64,45.2353,48.6610,44.7148,0.994481,charcoal aligned render
+smoke,Dust Devil,density,50,55.2732,35.2314,30.7450,0.955450,charcoal aligned render
+smoke,Ground Explosion,density,100,178.3428,42.8963,36.6224,0.978325,charcoal aligned render
+smoke,Smoke Plume,density,83,25.0927,30.8023,36.3203,0.968024,charcoal aligned render
+smoke,Dust Shockwave,density,77,25.4076,36.8504,37.7303,0.985732,charcoal aligned render
+smoke,Aerial Explosion,density,60,90.9303,41.3676,37.1587,0.974457,charcoal aligned render
+fire,Ground Explosion,density,64,178.3428,34.4195,27.8465,0.925275,Cycles original vs reconstructed
+fire,Ground Explosion,flames,64,219.2845,35.2976,,,aligned fire field
+fire,Aerial Explosion,density,60,90.9303,38.1131,32.6178,0.968620,Cycles original vs reconstructed
+fire,Aerial Explosion,flames,60,248.4191,36.6240,,,aligned fire field
+fire,Aerial Explosion,temperature,60,116.1757,50.6305,,,aligned temperature field
+fluid,Water Flow,quality_0p5,"0,36,72,108,140",46.5341,52.3393,45.2619,0.994957,compression-only aligned render
+fluid,Water Flow,performance_0p75,"0,36,72,108,140",36.2574,53.4012,45.7482,0.995490,compression-only aligned render
