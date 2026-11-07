@@ -116,6 +116,12 @@ float readPackedKeyframeValue(uint baseWord,
     return halfToFloat(valueBits);
 }
 
+uint readPackedKeyframeFrame(uint baseWord, uint keyBase, uint codec, uint index)
+{
+    return codec == 1u ? readPayloadU16(baseWord, keyBase + index * 8u)
+                      : readPayloadByte(baseWord, keyBase + index * 3u);
+}
+
 float decodeTemporalControlValue(uint baseWord,
                                  uint streamBase,
                                  uint codec,
@@ -125,76 +131,47 @@ float decodeTemporalControlValue(uint baseWord,
                                  int totalFrames,
                                  int frameIndex)
 {
+    const uint timeBinCount = TIME_BIN_COUNT;
+    if (controlIndex >= controlCount) return 0.0;
     uint descriptorBytes = controlCount * 4u;
-    uint binIndexBytes = alignUp4(controlCount * TIME_BIN_COUNT);
-    uint keyBase = streamBase + descriptorBytes + binIndexBytes;
-
-    uint descOffset = streamBase + controlIndex * 4u;
-    uint keyStart = readPayloadU16(baseWord, descOffset);
-    uint keyCount = readPayloadByte(baseWord, descOffset + 2u);
-    uint reserved = readPayloadByte(baseWord, descOffset + 3u);
-    if (keyCount == 0u) return 0.0;
-    if (keyCount == 1u) {
-        uint onlyFrame;
-        return readPackedKeyframeValue(baseWord, keyBase, codec, keyStart, keyframeCount, onlyFrame);
+    uint keyBase = streamBase + descriptorBytes + alignUp4(controlCount * timeBinCount);
+    uint desc = streamBase + controlIndex * 4u;
+    uint start = readPayloadU16(baseWord, desc);
+    uint count = readPayloadByte(baseWord, desc + 2u);
+    if (count == 0u || start + count > keyframeCount) return 0.0;
+    uint frame = uint(clamp(frameIndex, 0, max(totalFrames - 1, 0)));
+    uint bin = timeBinCount == 0u ? 0u : min(timeBinCount - 1u,
+        frame * timeBinCount / uint(max(totalFrames, 1)));
+    uint bins = streamBase + descriptorBytes + controlIndex * timeBinCount;
+    uint lo = timeBinCount == 0u ? 0u : min(readPayloadByte(baseWord, bins + bin), count - 1u);
+    uint f0 = readPackedKeyframeFrame(baseWord, keyBase, codec, start + lo);
+    if (f0 > frame) {
+        lo = 0u;
+        f0 = readPackedKeyframeFrame(baseWord, keyBase, codec, start);
     }
-
-    int clampedFrame = clamp(frameIndex, 0, max(totalFrames - 1, 0));
-    uint safeTotalFrames = max(uint(totalFrames), 1u);
-    int bin = int(min(TIME_BIN_COUNT - 1u,
-                      (uint(clampedFrame) * TIME_BIN_COUNT) / safeTotalFrames));
-    uint binBase = streamBase + descriptorBytes + controlIndex * TIME_BIN_COUNT;
-    int beginLocal = int(readPayloadByte(baseWord, binBase + uint(bin)));
-    beginLocal = clamp(beginLocal, 0, int(keyCount) - 1);
-
-    int endLocal = int(keyCount);
-    for (int next = bin + 1; next < int(TIME_BIN_COUNT); ++next) {
-        int nextLocal = int(readPayloadByte(baseWord, binBase + uint(next)));
-        if (nextLocal > beginLocal) {
-            endLocal = min(nextLocal, int(keyCount));
-            break;
-        }
+    if (f0 >= frame || lo + 1u >= count) {
+        return readPackedKeyframeValue(baseWord, keyBase, codec, start + lo, keyframeCount, f0);
     }
-    int localMaxBinLocalKeys = (reserved != 0u) ? int(reserved) : 8;
-    endLocal = min(endLocal, beginLocal + max(1, localMaxBinLocalKeys));
-
-    int prevLocal = beginLocal;
-    int currLocal = beginLocal;
-    while (currLocal < endLocal) {
-        uint currFrame;
-        float currValue = readPackedKeyframeValue(baseWord, keyBase, codec, keyStart + uint(currLocal), keyframeCount, currFrame);
-        if (int(currFrame) >= clampedFrame) {
-            if (int(currFrame) <= clampedFrame || currLocal == prevLocal) {
-                return currValue;
-            }
-            uint prevFrame;
-            float prevValue = readPackedKeyframeValue(baseWord, keyBase, codec, keyStart + uint(prevLocal), keyframeCount, prevFrame);
-            int f0 = int(prevFrame);
-            int f1 = int(currFrame);
-            if (f1 <= f0) return prevValue;
-            float alpha = float(clampedFrame - f0) / float(f1 - f0);
-            return mix(prevValue, currValue, alpha);
-        }
-        prevLocal = currLocal;
-        currLocal += 1;
+    // Bin predecessors accelerate lookup but never truncate the true bracket.
+    uint hi = bin + 1u < timeBinCount
+        ? min(count - 1u, readPayloadByte(baseWord, bins + bin + 1u) + 1u) : count - 1u;
+    hi = max(hi, lo + 1u);
+    uint f1 = readPackedKeyframeFrame(baseWord, keyBase, codec, start + hi);
+    if (f1 < frame) {
+        hi = count - 1u;
+        f1 = readPackedKeyframeFrame(baseWord, keyBase, codec, start + hi);
     }
-
-    currLocal = min(currLocal, int(keyCount) - 1);
-    uint currFrame;
-    float currValue = readPackedKeyframeValue(
-        baseWord, keyBase, codec, keyStart + uint(currLocal), keyframeCount, currFrame);
-    if (int(currFrame) <= clampedFrame || currLocal == prevLocal) {
-        return currValue;
+    if (f1 <= frame) return readPackedKeyframeValue(baseWord, keyBase, codec, start + hi, keyframeCount, f1);
+    while (hi > lo + 1u) {
+        uint mid = lo + (hi - lo) / 2u;
+        uint fm = readPackedKeyframeFrame(baseWord, keyBase, codec, start + mid);
+        if (fm < frame) { lo = mid; f0 = fm; }
+        else { hi = mid; f1 = fm; }
     }
-
-    uint prevFrame;
-    float prevValue = readPackedKeyframeValue(
-        baseWord, keyBase, codec, keyStart + uint(prevLocal), keyframeCount, prevFrame);
-    int f0 = int(prevFrame);
-    int f1 = int(currFrame);
-    if (f1 <= f0) return prevValue;
-    float alpha = float(clampedFrame - f0) / float(f1 - f0);
-    return mix(prevValue, currValue, alpha);
+    float nextValue = readPackedKeyframeValue(baseWord, keyBase, codec, start + hi, keyframeCount, f1);
+    if (f1 == frame) return nextValue;
+    float previous = readPackedKeyframeValue(baseWord, keyBase, codec, start + lo, keyframeCount, f0);
+    return mix(previous, nextValue, float(frame - f0) / float(f1 - f0));
 }
 
 float controlCoord(uint index, uint resolution)

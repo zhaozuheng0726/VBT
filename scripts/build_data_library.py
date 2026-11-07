@@ -131,7 +131,9 @@ def build_manifest() -> dict[str, Any]:
         "storage": "canonical final compressed assets under data/",
         "source_data": {
             "smoke_and_fire_vdb": "3D/data/smoke",
+            "official_smoke_baselines": "data/source/jangafx",
             "fluid_source": "3D/data/fluid/source",
+            "fluid_provenance": "data/source/fluid/README.md",
         },
         "assets": records,
     }

@@ -54,6 +54,11 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(vbt_temporal_decode_tests
+        tests/temporal_decode_tests.cpp src/render_temporal_decode.cpp src/render_temporal_payload.cpp)
+    target_include_directories(vbt_temporal_decode_tests PRIVATE src cycles_native_vbt)
+    add_test(NAME vbt_temporal_decode_tests COMMAND vbt_temporal_decode_tests)
+
     add_executable(vbt_raw_volume_tests
         tests/raw_volume_tests.cpp
         src/raw_volume.cpp

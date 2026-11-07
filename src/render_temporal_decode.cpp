@@ -66,6 +66,16 @@ RenderTemporalControlKeyframe readPackedKeyframe(const uint8_t* keyBase,
     return out;
 }
 
+uint16_t readPackedKeyframeFrame(const uint8_t* keyBase,
+                                 RenderTemporalSequenceCodec codec,
+                                 uint32_t keyIndex)
+{
+    const size_t offset = static_cast<size_t>(keyIndex) * renderTemporalKeyframeBytes(codec);
+    return codec == RenderTemporalSequenceCodec::DP_KEYFRAME_FP32
+        ? static_cast<uint16_t>(keyBase[offset] | (static_cast<uint16_t>(keyBase[offset + 1]) << 8u))
+        : keyBase[offset];
+}
+
 float decodeFromSequence(const uint8_t* keyBase,
                          RenderTemporalSequenceCodec codec,
                          uint32_t keyframeCount,
@@ -77,52 +87,46 @@ float decodeFromSequence(const uint8_t* keyBase,
                          int totalFrames,
                          int frameIndex)
 {
+    (void)maxBinLocalKeys;
     if (keyCount == 0) return 0.0f;
-    if (keyCount == 1) return readPackedKeyframe(keyBase, codec, keyStart, keyframeCount).value;
-
-    const int clampedFrame = std::max(0, std::min(totalFrames - 1, frameIndex));
-    const int bin = std::min<int>(timeBinCount - 1,
-                                  (static_cast<int64_t>(clampedFrame) * static_cast<int64_t>(timeBinCount)) /
-                                      std::max(1, totalFrames));
-    int beginLocal = static_cast<int>(localBinIndex[bin]);
-    beginLocal = std::max(0, std::min<int>(beginLocal, keyCount - 1));
-
-    int endLocal = static_cast<int>(keyCount);
-    for (int next = bin + 1; next < timeBinCount; ++next) {
-        const int nextLocal = static_cast<int>(localBinIndex[next]);
-        if (nextLocal > beginLocal) {
-            endLocal = std::min<int>(nextLocal, keyCount);
-            break;
-        }
+    const int frame = std::max(0, std::min(std::max(0, totalFrames - 1), frameIndex));
+    const auto timestamp = [&](uint32_t index) {
+        return static_cast<int>(readPackedKeyframeFrame(keyBase, codec, keyStart + index));
+    };
+    const auto value = [&](uint32_t index) {
+        return readPackedKeyframe(keyBase, codec, keyStart + index, keyframeCount).value;
+    };
+    const uint32_t last = keyCount - 1u;
+    const uint32_t bin = timeBinCount == 0 ? 0u : std::min<uint32_t>(timeBinCount - 1u,
+        static_cast<uint32_t>((static_cast<int64_t>(frame) * timeBinCount) / std::max(1, totalFrames)));
+    uint32_t lo = timeBinCount == 0 ? 0u : std::min<uint32_t>(localBinIndex[bin], last);
+    int f0 = timestamp(lo);
+    if (f0 > frame) {
+        lo = 0u;
+        f0 = timestamp(lo);
     }
-    endLocal = std::min<int>(endLocal, beginLocal + std::max<int>(1, maxBinLocalKeys));
+    if (f0 >= frame || lo == last) return value(lo);
 
-    int prev = beginLocal;
-    int curr = beginLocal;
-    while (curr < endLocal &&
-           readPackedKeyframe(keyBase, codec, keyStart + static_cast<uint32_t>(curr), keyframeCount).frame <
-               static_cast<uint16_t>(clampedFrame)) {
-        prev = curr;
-        ++curr;
+    // Bins are hints: the next predecessor is not an interpolation boundary.
+    uint32_t hi = bin + 1u < timeBinCount
+        ? std::min<uint32_t>(localBinIndex[bin + 1u] + 1u, last) : last;
+    hi = std::max(hi, lo + 1u);
+    int f1 = timestamp(hi);
+    if (f1 < frame) {
+        hi = last;
+        f1 = timestamp(hi);
     }
-
-    if (curr >= keyCount) curr = keyCount - 1;
-    const auto currKey =
-        readPackedKeyframe(keyBase, codec, keyStart + static_cast<uint32_t>(curr), keyframeCount);
-    if (currKey.frame <= static_cast<uint16_t>(clampedFrame) || curr == prev) {
-        return currKey.value;
+    if (f1 <= frame) return value(hi);
+    while (hi > lo + 1u) {
+        const uint32_t mid = lo + (hi - lo) / 2u;
+        const int fm = timestamp(mid);
+        if (fm < frame) { lo = mid; f0 = fm; }
+        else { hi = mid; f1 = fm; }
     }
-
-    const auto prevKey =
-        readPackedKeyframe(keyBase, codec, keyStart + static_cast<uint32_t>(prev), keyframeCount);
-    const int f0 = static_cast<int>(prevKey.frame);
-    const int f1 = static_cast<int>(currKey.frame);
-    if (f1 <= f0) {
-        return prevKey.value;
-    }
-    const float v0 = prevKey.value;
-    const float v1 = currKey.value;
-    const float alpha = static_cast<float>(clampedFrame - f0) / static_cast<float>(f1 - f0);
+    const float v1 = value(hi);
+    if (f1 == frame) return v1;
+    const float v0 = value(lo);
+    const float alpha = static_cast<float>(frame - f0) / static_cast<float>(f1 - f0);
     return v0 + alpha * (v1 - v0);
 }
 

@@ -155,6 +155,13 @@ VBT_CYCLES_DEVICE float read_keyframe_value(const uint32_t *payload,
     return half_to_float(read_payload_u16(payload, offset + 1u));
 }
 
+VBT_CYCLES_DEVICE uint32_t temporal_key_frame(const uint32_t *payload, uint32_t key_base,
+                                              uint32_t codec, uint32_t index)
+{
+    return codec == 1u ? read_payload_u16(payload, key_base + index * 8u)
+                       : read_payload_byte(payload, key_base + index * 3u);
+}
+
 VBT_CYCLES_DEVICE float decode_temporal_control_value(const uint32_t *payload,
                                                        uint32_t stream_base,
                                                        uint32_t codec,
@@ -164,101 +171,44 @@ VBT_CYCLES_DEVICE float decode_temporal_control_value(const uint32_t *payload,
                                                        int total_frames,
                                                        int frame_index)
 {
-    (void)keyframe_count;
     const uint32_t descriptor_bytes = control_count * 4u;
-    const uint32_t bin_index_bytes = align_up4(control_count * VBT_TIME_BIN_COUNT);
-    const uint32_t key_base = stream_base + descriptor_bytes + bin_index_bytes;
-
-    const uint32_t desc_offset = stream_base + control_index * 4u;
-    const uint32_t key_start = read_payload_u16(payload, desc_offset);
-    const uint32_t key_count = read_payload_byte(payload, desc_offset + 2u);
-    const uint32_t reserved = read_payload_byte(payload, desc_offset + 3u);
-
-    if (key_count == 0u) {
-        return 0.0f;
+    const uint32_t key_base = stream_base + descriptor_bytes + align_up4(control_count * VBT_TIME_BIN_COUNT);
+    const uint32_t desc = stream_base + control_index * 4u;
+    const uint32_t start = read_payload_u16(payload, desc);
+    const uint32_t count = read_payload_byte(payload, desc + 2u);
+    if (count == 0u || start + count > keyframe_count) return 0.0f;
+    const uint32_t frame = static_cast<uint32_t>(clamp_i32(frame_index, 0, total_frames > 0 ? total_frames - 1 : 0));
+    const uint32_t bin = min_u32(7u, frame * 8u / max_u32(static_cast<uint32_t>(total_frames), 1u));
+    const uint32_t bins = stream_base + descriptor_bytes + control_index * VBT_TIME_BIN_COUNT;
+    uint32_t lo = min_u32(read_payload_byte(payload, bins + bin), count - 1u);
+    uint32_t f0 = temporal_key_frame(payload, key_base, codec, start + lo);
+    if (f0 > frame) {
+        lo = 0u;
+        f0 = temporal_key_frame(payload, key_base, codec, start);
     }
-    if (key_count == 1u) {
-        uint32_t only_frame = 0u;
-        return read_keyframe_value(payload, key_base, codec, key_start, &only_frame);
+    if (f0 >= frame || lo + 1u >= count) {
+        return read_keyframe_value(payload, key_base, codec, start + lo, &f0);
     }
-
-    const int clamped_frame = clamp_i32(frame_index, 0, total_frames > 0 ? total_frames - 1 : 0);
-    const uint32_t safe_total_frames = max_u32(static_cast<uint32_t>(total_frames), 1u);
-    const uint32_t bin = min_u32(VBT_TIME_BIN_COUNT - 1u,
-                                 (static_cast<uint32_t>(clamped_frame) * VBT_TIME_BIN_COUNT) /
-                                     safe_total_frames);
-    const uint32_t bin_base = stream_base + descriptor_bytes + control_index * VBT_TIME_BIN_COUNT;
-    int begin_local = static_cast<int>(read_payload_byte(payload, bin_base + bin));
-    begin_local = clamp_i32(begin_local, 0, static_cast<int>(key_count) - 1);
-
-    int end_local = static_cast<int>(key_count);
-    for (int next = static_cast<int>(bin) + 1; next < static_cast<int>(VBT_TIME_BIN_COUNT); ++next) {
-        const int next_local = static_cast<int>(read_payload_byte(payload, bin_base + static_cast<uint32_t>(next)));
-        if (next_local > begin_local) {
-            end_local = next_local < static_cast<int>(key_count) ? next_local : static_cast<int>(key_count);
-            break;
-        }
+    // The next bin stores a predecessor: include its successor as the bracket.
+    uint32_t hi = bin < 7u ? min_u32(count - 1u, read_payload_byte(payload, bins + bin + 1u) + 1u) : count - 1u;
+    hi = max_u32(hi, lo + 1u);
+    uint32_t f1 = temporal_key_frame(payload, key_base, codec, start + hi);
+    if (f1 < frame) {
+        hi = count - 1u;
+        f1 = temporal_key_frame(payload, key_base, codec, start + hi);
     }
-
-    const int local_max_bin_keys = reserved != 0u ? static_cast<int>(reserved) : 8;
-    const int bounded_end = begin_local + (local_max_bin_keys > 1 ? local_max_bin_keys : 1);
-    end_local = end_local < bounded_end ? end_local : bounded_end;
-
-    int prev_local = begin_local;
-    int curr_local = begin_local;
-    while (curr_local < end_local) {
-        uint32_t curr_frame = 0u;
-        const float curr_value = read_keyframe_value(payload,
-                                                     key_base,
-                                                     codec,
-                                                     key_start + static_cast<uint32_t>(curr_local),
-                                                     &curr_frame);
-        if (static_cast<int>(curr_frame) >= clamped_frame) {
-            if (static_cast<int>(curr_frame) <= clamped_frame || curr_local == prev_local) {
-                return curr_value;
-            }
-            uint32_t prev_frame = 0u;
-            const float prev_value = read_keyframe_value(payload,
-                                                         key_base,
-                                                         codec,
-                                                         key_start + static_cast<uint32_t>(prev_local),
-                                                         &prev_frame);
-            const int f0 = static_cast<int>(prev_frame);
-            const int f1 = static_cast<int>(curr_frame);
-            if (f1 <= f0) {
-                return prev_value;
-            }
-            const float alpha = static_cast<float>(clamped_frame - f0) / static_cast<float>(f1 - f0);
-            return mix_f32(prev_value, curr_value, alpha);
-        }
-        prev_local = curr_local;
-        ++curr_local;
+    if (f1 <= frame) return read_keyframe_value(payload, key_base, codec, start + hi, &f1);
+    while (hi > lo + 1u) {
+        const uint32_t mid = lo + (hi - lo) / 2u;
+        const uint32_t fm = temporal_key_frame(payload, key_base, codec, start + mid);
+        if (fm < frame) { lo = mid; f0 = fm; }
+        else { hi = mid; f1 = fm; }
     }
-
-    curr_local = curr_local < static_cast<int>(key_count) ? curr_local : static_cast<int>(key_count) - 1;
-    uint32_t curr_frame = 0u;
-    const float curr_value = read_keyframe_value(payload,
-                                                 key_base,
-                                                 codec,
-                                                 key_start + static_cast<uint32_t>(curr_local),
-                                                 &curr_frame);
-    if (static_cast<int>(curr_frame) <= clamped_frame || curr_local == prev_local) {
-        return curr_value;
-    }
-
-    uint32_t prev_frame = 0u;
-    const float prev_value = read_keyframe_value(payload,
-                                                 key_base,
-                                                 codec,
-                                                 key_start + static_cast<uint32_t>(prev_local),
-                                                 &prev_frame);
-    const int f0 = static_cast<int>(prev_frame);
-    const int f1 = static_cast<int>(curr_frame);
-    if (f1 <= f0) {
-        return prev_value;
-    }
-    const float alpha = static_cast<float>(clamped_frame - f0) / static_cast<float>(f1 - f0);
-    return mix_f32(prev_value, curr_value, alpha);
+    const float next = read_keyframe_value(payload, key_base, codec, start + hi, &f1);
+    if (f1 == frame) return next;
+    const float previous = read_keyframe_value(payload, key_base, codec, start + lo, &f0);
+    const float alpha = static_cast<float>(frame - f0) / static_cast<float>(f1 - f0);
+    return mix_f32(previous, next, alpha);
 }
 
 VBT_CYCLES_DEVICE float control_coord(uint32_t index, uint32_t resolution)

@@ -122,3 +122,14 @@ panel.
 The file picker opens `../data` by default. Runtime `.vbtp` files and their
 source datasets are intentionally not versioned; see `../data/README.md` for
 the local catalog layout.
+## Temporal Decoder Update (2026-09-30)
+
+The current local build uses guarded temporal bracketing rather than treating
+time-bin hints as scan limits. This fixes incorrect interpolation at some frame
+boundaries in Grid4/Fine6 and the liquid Mode2 shell stream, without changing
+compressed files. Earlier July performance/quality measurements below describe
+the old decoder and must not be relabeled as corrected measurements.
+
+The local validation campaign is retained outside the public source tree.
+The native Cycles sampler still does not support Mode2 liquid sampling; this
+Studio fix does not add that capability or update an installed Blender binary.

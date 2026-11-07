@@ -5,6 +5,10 @@
 #include "render_temporal_payload.h"
 #include "render_temporal_route.h"
 
+#ifdef VBT_VALIDATION_EXPERIMENTS
+#include "ablation_controls.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -16,6 +20,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -29,6 +34,9 @@ using namespace vbt;
 namespace {
 
 struct ProbeCliOptions {
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    vbt_validation::AblationControls ablation;
+#endif
     std::filesystem::path inputRaw;
     std::filesystem::path metadataPath;
     std::filesystem::path reportPath;
@@ -60,6 +68,8 @@ struct ProbeCliOptions {
     float routeShellGainThr = 1.0f;
     RenderTemporalSequenceCodec packedCodec = RenderTemporalSequenceCodec::DP_KEYFRAME_FP16;
     uint64_t savedFileBytes = 0;
+    uint64_t shellOverflowFine6Leaves = 0;
+    uint64_t shellOverflowGrid4Leaves = 0;
     bool preferShellVoxelSave = false;
     bool levelSetSurfaceMode = false;
     bool legacyLevelSetRoute = false;
@@ -69,6 +79,10 @@ struct ProbeCliOptions {
 };
 
 struct DensityTemporalProfile {
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    bool retainAllFrames = false;
+    bool guardConstantEvents = false;
+#endif
     float epsAbs = 1e-5f;
     float epsRel = 0.02f;
     float gammaDelta = 0.2f;
@@ -154,6 +168,16 @@ void printUsage()
         << "                              [--levelset-temporal-band <world-distance>] [--legacy-levelset-route]\n"
         << "                              [--cutoff-protect|--no-cutoff-protect]\n"
         << "                              [--omp-threads N] [--save-vbt <file.vbtp>] [--report <path>]\n";
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    std::cout
+        << "Experiment-only options:\n"
+        << "  --ablation-temporal adaptive|off|voxel-off|control-off\n"
+        << "  --ablation-fine6 adaptive|none|all\n"
+        << "  --ablation-domain density|levelset (levelset opt-in; Mode2 time/event controls only)\n"
+        << "  --ablation-constant-events legacy|guarded\n"
+        << "  --ablation-route-step 1..8 (separate route sampling; default follows sample-step)\n"
+        << "  --ablation-manifest <json> --ablation-route-in <json> --ablation-route-out <json>\n";
+#endif
 }
 
 double computePsnr(double rmse, double peak)
@@ -441,6 +465,15 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     controlProfile.epsAbs *= std::max(1.0f, cli.controlEpsScale);
     controlProfile.epsRel *= std::max(1.0f, cli.controlEpsScale);
     controlProfile.isoSurfaceProtect = false;
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    temporalProfile.retainAllFrames = cli.ablation.retainVoxelFrames();
+    controlProfile.retainAllFrames = cli.ablation.retainControlFrames();
+    temporalProfile.guardConstantEvents = cli.ablation.constantEvents == "guarded";
+    controlProfile.guardConstantEvents = temporalProfile.guardConstantEvents;
+    cli.ablation.initialize(cli.inputRaw,
+        {raw.meta.width, raw.meta.height, raw.meta.depth, frames},
+        static_cast<size_t>(totalLeafCount), cli.levelSetSurfaceMode);
+#endif
     const double bgThreshold = cli.cutoff > 0.0f ? static_cast<double>(cli.bgZeroRatio * cli.cutoff) : -1.0;
 
     std::vector<RenderTemporalVariantSpec> variantSpecs = buildRenderTemporalFormalProbeVariants();
@@ -449,8 +482,10 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
             std::remove_if(
                 variantSpecs.begin(),
                 variantSpecs.end(),
-                [](const RenderTemporalVariantSpec& spec) {
-                    return spec.name != "coarse_only" && spec.name != "fine6_full" && !spec.routeSelect;
+                [levelSetSurfaceMode = cli.levelSetSurfaceMode](const RenderTemporalVariantSpec& spec) {
+                    const bool shellSource = levelSetSurfaceMode && spec.name == "shellvoxel_band25_100";
+                    return spec.name != "coarse_only" && spec.name != "fine6_full" &&
+                           !spec.routeSelect && !shellSource;
                 }),
             variantSpecs.end());
     }
@@ -521,6 +556,8 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     routeOptions.shellGainThreshold = cli.routeShellGainThr;
 
     std::atomic<bool> workerFailed{false};
+    std::atomic<uint64_t> shellOverflowFine6Leaves{0};
+    std::atomic<uint64_t> shellOverflowGrid4Leaves{0};
     std::string workerError;
 
 #ifdef VBT_USE_OPENMP
@@ -635,6 +672,7 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                     bool hasFine6Band = false;
                     bool hasFine6Gain = false;
                     bool hasShellVoxel = false;
+                    bool shellOverflow = false;
                     // Mode2 (TemporalShellVoxel) layout reconstruction is in progress; the
                     // probe still hits a STATUS_STACK_BUFFER_OVERRUN somewhere in the sample
                     // loop after the shell-residual stream is written. Bypass keeps the rest
@@ -975,6 +1013,17 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                             shellVoxelPackedStream.data.maxBinLocalKeys = shellVoxelPackedStream.requiredMaxBinLocalKeys;
                             if (activeVoxelCount == 0) {
                                 hasShellVoxel = false;
+                            } else if (shellVoxelPackedStream.data.keyframes.size() >
+                                       std::numeric_limits<uint16_t>::max()) {
+                                // VBTPACK4 has a 16-bit per-leaf fine-key count.
+                                hasShellVoxel = false;
+                                shellOverflow = true;
+                                for (size_t vi = 0; vi < baseVariantCount; ++vi) {
+                                    if (enableShellVoxel[vi]) {
+                                        enableShellVoxel[vi] = false;
+                                        localFineLeaves[vi] -= 1;
+                                    }
+                                }
                             }
                         }
 
@@ -1053,17 +1102,28 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                         }
                     }
 
+                    int routeSampleStep = cli.sampleStep;
+#ifdef VBT_VALIDATION_EXPERIMENTS
+                    if (cli.ablation.routeSampleStep > 0) routeSampleStep = cli.ablation.routeSampleStep;
+#endif
+                    // A common lattice covers both independent sampling contracts.
+                    const int pointSampleStep = std::gcd(cli.sampleStep, routeSampleStep);
                     samplePoints.clear();
-                    for (int t = 0; t < raw.meta.frames; t += cli.sampleStep) {
+                    for (int t = 0; t < raw.meta.frames; t += pointSampleStep) {
                         for (int lz = 0; lz < leafDepth; ++lz) {
                             const int z = baseZ + lz;
-                            if ((z % cli.sampleStep) != 0) continue;
+                            if ((z % pointSampleStep) != 0) continue;
                             for (int ly = 0; ly < leafHeight; ++ly) {
                                 const int y = baseY + ly;
-                                if ((y % cli.sampleStep) != 0) continue;
+                                if ((y % pointSampleStep) != 0) continue;
                                 for (int lx = 0; lx < leafWidth; ++lx) {
                                     const int x = baseX + lx;
-                                    if ((x % cli.sampleStep) != 0) continue;
+                                    if ((x % pointSampleStep) != 0) continue;
+                                    const bool routeSample = (t % routeSampleStep) == 0 && (x % routeSampleStep) == 0 &&
+                                        (y % routeSampleStep) == 0 && (z % routeSampleStep) == 0;
+                                    const bool metricSample = (t % cli.sampleStep) == 0 && (x % cli.sampleStep) == 0 &&
+                                        (y % cli.sampleStep) == 0 && (z % cli.sampleStep) == 0;
+                                    if (!routeSample && !metricSample) continue;
                                     const float truth = raw.at(x, y, z, t);
                                     float coarsePred = 0.0f;
                                     float fine6Pred = 0.0f;
@@ -1136,10 +1196,14 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                         uint64_t visibleCount = 0;
                         uint64_t bandCount = 0;
                         uint64_t shellCount = 0;
+                        uint64_t routeSampleCount = 0;
                         const double cutoffLo = static_cast<double>(cli.cutoff - cli.cutoffBand);
                         const double cutoffHi = static_cast<double>(cli.cutoff + cli.cutoffBand);
                         const double shellCut = static_cast<double>(raw.meta.dataMax) * 0.35;
                         for (const auto& sp : samplePoints) {
+                            if ((sp.t % routeSampleStep) != 0 || ((baseX + sp.lx) % routeSampleStep) != 0 ||
+                                ((baseY + sp.ly) % routeSampleStep) != 0 || ((baseZ + sp.lz) % routeSampleStep) != 0) continue;
+                            ++routeSampleCount;
                             const double truth = static_cast<double>(sp.truth);
                             if (truth >= cutoffLo) visibleCount += 1;
                             if (truth >= cutoffLo && truth <= cutoffHi) bandCount += 1;
@@ -1159,7 +1223,7 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                                 shellVoxelPeak = std::max(shellVoxelPeak, std::abs(shellDiff) / peak);
                             }
                         }
-                        const double sampleCount = static_cast<double>(samplePoints.size());
+                        const double sampleCount = static_cast<double>(std::max<uint64_t>(1, routeSampleCount));
                         routedMetrics.visibleFrac = static_cast<double>(visibleCount) / sampleCount;
                         routedMetrics.bandFrac = static_cast<double>(bandCount) / sampleCount;
                         routedMetrics.shellFrac = static_cast<double>(shellCount) / sampleCount;
@@ -1175,12 +1239,25 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                             routedMetrics.shellVoxelPeak = shellVoxelPeak;
                         }
                     }
-                    const auto routedMode =
+                    auto routedMode =
                         cli.levelSetSurfaceMode
                             ? (hasShellVoxel
                                    ? RenderTemporalFormalMode::FINE_COMPACT
                                    : RenderTemporalFormalMode::COARSE_ONLY)
                             : routeRenderTemporalLeaf(emptyLeaf, routedMetrics, routeOptions);
+                    if (shellOverflow) {
+                        if (hasFine6 && fine6PackedStream.data.keyframes.size() <=
+                                            std::numeric_limits<uint16_t>::max()) {
+                            routedMode = RenderTemporalFormalMode::FINE6_FULL;
+                            shellOverflowFine6Leaves.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            routedMode = RenderTemporalFormalMode::COARSE_ONLY;
+                            shellOverflowGrid4Leaves.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+#ifdef VBT_VALIDATION_EXPERIMENTS
+                    routedMode = cli.ablation.route(static_cast<size_t>(leafLinearIndex), emptyLeaf, routedMode);
+#endif
 
                     std::vector<uint8_t> packedFine6LeafBytes;
                     std::vector<uint8_t> packedShellVoxelLeafBytes;
@@ -1566,6 +1643,8 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                     }
 
                         for (const auto& sp : samplePoints) {
+                            if ((sp.t % cli.sampleStep) != 0 || ((baseX + sp.lx) % cli.sampleStep) != 0 ||
+                                ((baseY + sp.ly) % cli.sampleStep) != 0 || ((baseZ + sp.lz) % cli.sampleStep) != 0) continue;
                             const int tileIdx = (sp.lz / 4) * 4 + (sp.ly / 4) * 2 + (sp.lx / 4);
                             for (size_t vi = 0; vi < variants.size(); ++vi) {
                                 float pred = sp.coarsePred;
@@ -1749,6 +1828,8 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
     if (workerFailed.load(std::memory_order_relaxed)) {
         throw std::runtime_error(workerError.empty() ? "Render-temporal worker failed" : workerError);
     }
+    cli.shellOverflowFine6Leaves = shellOverflowFine6Leaves.load(std::memory_order_relaxed);
+    cli.shellOverflowGrid4Leaves = shellOverflowGrid4Leaves.load(std::memory_order_relaxed);
 
     temporalStats.voxelCount = static_cast<uint64_t>(raw.frameVoxelCount());
     temporalStats.rmse = std::sqrt(temporalStats.rmse / std::max(1.0, static_cast<double>(raw.totalVoxelCount())));
@@ -1770,6 +1851,24 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
                                                           savedLeafPayloads);
     }
 
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    const auto& measured = variants[packedRoutedVariantIndex];
+    cli.ablation.finish({
+        {"saved_file_bytes", cli.savedFileBytes}, {"event_protection", cli.cutoffProtect},
+        {"cutoff", cli.cutoff}, {"cutoff_band", cli.cutoffBand},
+        {"eps_abs", cli.temporalEpsAbs}, {"eps_rel", cli.temporalEpsRel},
+        {"gamma_delta", cli.temporalGammaDelta}, {"control_eps_scale", cli.controlEpsScale},
+        {"background_zero_ratio", cli.bgZeroRatio}, {"sample_step", cli.sampleStep},
+        {"voxel_count", temporalStats.voxelCount},
+        {"background_zeroed_voxels", temporalStats.backgroundZeroedVoxels},
+        {"voxel_keyframes", temporalStats.totalKeyframes},
+        {"protected_voxel_series", temporalStats.temporalProtectedSeries},
+        {"temporal_only_rmse", temporalStats.rmse},
+        {"coarse_keyframes", measured.coarseKeyframes}, {"fine_keyframes", measured.fineKeyframes},
+        {"probe_sampled_rmse", measured.rmse},
+        {"probe_metric_scope", "diagnostic only; evaluate the saved file independently"}});
+#endif
+
     std::filesystem::create_directories(cli.reportPath.parent_path());
     writeReport(cli.reportPath, cli, raw, temporalStats, variants);
     if (exportFrameEnabled) {
@@ -1786,6 +1885,8 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
         std::cout << "Temporal avg KFs      : "
                   << (temporalStats.voxelCount > 0 ? static_cast<double>(temporalStats.totalKeyframes) / static_cast<double>(temporalStats.voxelCount) : 0.0)
                   << "\n";
+        std::cout << "Shell overflow Fine6  : " << cli.shellOverflowFine6Leaves << " leaves\n";
+        std::cout << "Shell overflow Grid4  : " << cli.shellOverflowGrid4Leaves << " leaves\n";
         for (const auto& v : variants) {
             std::cout << "Variant               : " << v.name
                       << "  estMB=" << std::fixed << std::setprecision(3) << (static_cast<double>(v.estimatedBytes) / (1024.0 * 1024.0))
@@ -1812,6 +1913,9 @@ static int runRenderTemporalPipeline(ProbeCliOptions cli, bool printConsole)
 int main(int argc, char** argv)
 {
     ProbeCliOptions cli;
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    try {
+#endif
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--input-raw" && i + 1 < argc) cli.inputRaw = argv[++i];
@@ -1850,6 +1954,9 @@ int main(int argc, char** argv)
         else if (arg == "--omp-threads" && i + 1 < argc) cli.ompThreads = std::stoi(argv[++i]);
         else if (arg == "--save-vbt" && i + 1 < argc) cli.saveVbtPath = argv[++i];
         else if (arg == "--report" && i + 1 < argc) cli.reportPath = argv[++i];
+#ifdef VBT_VALIDATION_EXPERIMENTS
+        else if (cli.ablation.parse(i, argc, argv)) {}
+#endif
         else if (arg == "--help" || arg == "-h") {
             printUsage();
             return 0;
@@ -1866,6 +1973,12 @@ int main(int argc, char** argv)
         std::cerr.flush();
         return 99;
     }
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    } catch (const std::exception& ex) {
+        std::cerr << "[experiment argument error] " << ex.what() << '\n';
+        return 2;
+    }
+#endif
 }
 #endif
 
@@ -1973,6 +2086,14 @@ std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
     if (n == 0) return {};
     if (n == 1) return {0};
 
+#ifdef VBT_VALIDATION_EXPERIMENTS
+    if (profile.retainAllFrames) {
+        std::vector<int> keys(static_cast<size_t>(n));
+        for (int t = 0; t < n; ++t) keys[static_cast<size_t>(t)] = t;
+        return keys;
+    }
+#endif
+
     const auto stats = computeStats(values);
     const float epsFloor = std::max(1e-6f, profile.epsAbs * 0.1f);
     {
@@ -1984,7 +2105,27 @@ std::vector<int> detectDensityKeyFrames(const std::vector<float>& values,
         }
         const double mean = sum / static_cast<double>(n);
         const double var = std::max(0.0, sum2 / static_cast<double>(n) - mean * mean);
-        if (var < static_cast<double>(epsFloor) * epsFloor) return {0};
+        if (var < static_cast<double>(epsFloor) * epsFloor) {
+#ifdef VBT_VALIDATION_EXPERIMENTS
+            bool crossesProtectedBoundary = false;
+            if (profile.guardConstantEvents && profile.cutoffTemporalProtect &&
+                profile.renderCutoff > 0.0f && profile.cutoffBand >= 0.0f) {
+                const int initialState = cutoffState(values.front(), profile.renderCutoff, profile.cutoffBand);
+                const bool initialVisible = values.front() >= profile.renderCutoff;
+                for (int t = 1; t < n; ++t) {
+                    const float value = values[static_cast<size_t>(t)];
+                    if (cutoffState(value, profile.renderCutoff, profile.cutoffBand) != initialState ||
+                        (value >= profile.renderCutoff) != initialVisible) {
+                        crossesProtectedBoundary = true;
+                        break;
+                    }
+                }
+            }
+            if (!crossesProtectedBoundary) return {0};
+#else
+            return {0};
+#endif
+        }
     }
 
     std::vector<int> keys{0, n - 1};
@@ -2345,6 +2486,8 @@ void writeReport(const std::filesystem::path& path,
         out << "- level-set coarse guard band: `" << cli.levelSetCoarseGuardBand << "`\n";
         out << "- level-set temporal protect band: `" << cli.levelSetTemporalBand << "`\n";
     }
+    out << "- shell-overflow Fine6 fallbacks: `" << cli.shellOverflowFine6Leaves << "`\n";
+    out << "- shell-overflow Grid4 fallbacks: `" << cli.shellOverflowGrid4Leaves << "`\n";
     if (!cli.saveVbtPath.empty()) {
         out << "- saved probe file: `" << cli.saveVbtPath.string() << "`\n";
         out << "- saved probe bytes: `" << cli.savedFileBytes << "`\n";

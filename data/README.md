@@ -31,9 +31,15 @@ scale, and level-set background values load automatically.
 Source data remains separate from compressed runtime assets:
 
 ```text
-3D/data/smoke/         smoke and fire VDB sequences
+3D/data/smoke/         smoke and fire VDB source location
+data/source/jangafx/  official VDB/NanoVDB baseline provenance and manifests
 3D/data/fluid/source/  water Alembic and Blender source assets
 ```
+
+Use `data/source/jangafx/README.md` for the reproducible official OpenVDB and
+NanoVDB storage-baseline workflow.
+Use `data/source/fluid/README.md` for the water-flow author, product URL,
+license label, frame-count contract, and redistribution boundary.
 
 Rebuild or verify `catalog.json` against the canonical files with:
 

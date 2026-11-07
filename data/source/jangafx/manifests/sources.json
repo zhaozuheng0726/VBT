@@ -1,0 +1,70 @@
+{
+  "source_page": "https://jangafx.com/software/embergen/download/free-vdb-animations",
+  "license": "CC0 Public Domain",
+  "checked_utc": "2026-07-22",
+  "datasets": [
+    {
+      "id": "industrial_chimney",
+      "paper_name": "Industrial Chimney",
+      "official_name": "Industrial Chimney Smoke",
+      "page_advertised_frames": 250,
+      "archive_name": "IndustrialChimneySmokeVDB.zip",
+      "archive_bytes": 1234636352,
+      "mediafire_url": "https://www.mediafire.com/file/1luvuum7gf4urxt/IndustrialChimneySmokeVDB.zip/file"
+    },
+    {
+      "id": "tornado_looping",
+      "paper_name": "Tornado Looping",
+      "official_name": "Tornado Looping",
+      "page_advertised_frames": 200,
+      "archive_name": "TornadoLoopingVDB.zip",
+      "archive_bytes": 1797795595,
+      "mediafire_url": "https://www.mediafire.com/file/fynwmhozanxv821/TornadoLoopingVDB.zip/file"
+    },
+    {
+      "id": "dust_devil",
+      "paper_name": "Dust Devil",
+      "official_name": "Dust Devil (Tornado)",
+      "page_advertised_frames": 101,
+      "archive_name": "Dust_Devil.rar",
+      "archive_bytes": 443091668,
+      "mediafire_url": "https://www.mediafire.com/file/wr3wt0szq656f0s/Dust_Devil.rar/file"
+    },
+    {
+      "id": "ground_explosion",
+      "paper_name": "Ground Explosion",
+      "official_name": "Ground Explosion",
+      "page_advertised_frames": 200,
+      "archive_name": "GroundExplosionVDB.zip",
+      "archive_bytes": 694118838,
+      "mediafire_url": "https://www.mediafire.com/file/vm64xg0vta64qgl/GroundExplosionVDB.zip/file"
+    },
+    {
+      "id": "smoke_plume",
+      "paper_name": "Smoke Plume",
+      "official_name": "High-Res Smoke Plume",
+      "page_advertised_frames": 167,
+      "archive_name": "Smoke_Plume_01.rar",
+      "archive_bytes": 3016963848,
+      "mediafire_url": "https://www.mediafire.com/file/v6wkvnn4jxjnv0c/Smoke_Plume_01.rar/file"
+    },
+    {
+      "id": "dust_shockwave",
+      "paper_name": "Dust Shockwave",
+      "official_name": "Dust Shockwave",
+      "page_advertised_frames": 155,
+      "archive_name": "DustShockwaveVDB.zip",
+      "archive_bytes": 5376556384,
+      "mediafire_url": "https://www.mediafire.com/file/lfxz78h1mbwucnr/DustShockwaveVDB.zip/file"
+    },
+    {
+      "id": "aerial_explosion",
+      "paper_name": "Aerial Explosion",
+      "official_name": "Aerial Explosion",
+      "page_advertised_frames": 120,
+      "archive_name": "AerialExplosionVDB.zip",
+      "archive_bytes": 7086985078,
+      "mediafire_url": "https://www.mediafire.com/file/toxcf3jmeuu4ub1/AerialExplosionVDB.zip/file"
+    }
+  ]
+}

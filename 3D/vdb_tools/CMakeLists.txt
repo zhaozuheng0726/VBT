@@ -95,7 +95,8 @@ add_executable(vdb_to_nanovdb ../vdb_to_nanovdb.cpp)
 target_include_directories(vdb_to_nanovdb PRIVATE
   "${CMAKE_SOURCE_DIR}/../compare/openvdb-master/nanovdb"
 )
-target_link_libraries(vdb_to_nanovdb PRIVATE openvdb_shared)
+find_package(ZLIB REQUIRED)
+target_link_libraries(vdb_to_nanovdb PRIVATE openvdb_shared ZLIB::ZLIB)
 
 add_executable(vbt_to_vdb ../vbt_to_vdb.cpp ../block_tree.cpp ../keyframe_detector.cpp)
 target_include_directories(vbt_to_vdb PRIVATE "${CMAKE_SOURCE_DIR}/..")

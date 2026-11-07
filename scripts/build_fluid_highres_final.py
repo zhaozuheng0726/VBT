@@ -122,6 +122,16 @@ def main() -> int:
         canonical_metadata = load_json(output_metadata)
         canonical_metadata["source_dir"] = "3D/data/fluid/source"
         canonical_metadata["source_asset"] = "3D/data/fluid/source/water_flow.abc"
+        canonical_metadata["source_title"] = "water flow"
+        canonical_metadata["source_author"] = "aboubakrvfx"
+        canonical_metadata["source_url"] = (
+            "https://www.cgtrader.com/3d-models/food/miscellaneous/water-flow"
+        )
+        canonical_metadata["source_download_url"] = (
+            "https://www.cgtrader.com/items/2522986/download-page"
+        )
+        canonical_metadata["source_license"] = "Royalty Free License (no AI)"
+        canonical_metadata["source_page_frames"] = 150
         canonical_metadata["generated_obj_cache_retained"] = False
         output_metadata.write_text(
             json.dumps(canonical_metadata, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"

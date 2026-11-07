@@ -1,0 +1,8 @@
+﻿"dataset","official_name","archive","archive_bytes","page_advertised_frames","archive_vdb_frames","frame_count_matches_page","archive_vdb_bytes","vbt_matched_frames","matched_source_vdb_bytes","extra_archive_frames","preview_files","preview_unpacked_bytes","preset_files"
+"industrial_chimney","Industrial Chimney Smoke","IndustrialChimneySmokeVDB.zip","1234636352","250","250","True","2801138293","250","2801138293","0","1","4385194","1"
+"tornado_looping","Tornado Looping","TornadoLoopingVDB.zip","1797795595","200","128","False","2326518916","128","2326518916","0","1","7470421","2"
+"dust_devil","Dust Devil (Tornado)","Dust_Devil.rar","443091668","101","101","True","616587146","101","616587146","0","0","0","0"
+"ground_explosion","Ground Explosion","GroundExplosionVDB.zip","694118838","200","200","True","1335258277","200","1335258277","0","1","3569017","1"
+"smoke_plume","High-Res Smoke Plume","Smoke_Plume_01.rar","3016963848","167","166","False","4010450094","166","4010450094","0","0","0","0"
+"dust_shockwave","Dust Shockwave","DustShockwaveVDB.zip","5376556384","155","155","True","13388801537","155","13388801537","0","1","7444840","1"
+"aerial_explosion","Aerial Explosion","AerialExplosionVDB.zip","7086985078","120","120","True","13309023186","120","13309023186","0","1","5858307","1"

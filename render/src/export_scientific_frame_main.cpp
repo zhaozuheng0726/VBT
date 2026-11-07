@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <cstring>
 
 using namespace vbt::render;
 
@@ -52,6 +53,23 @@ int main(int argc, char** argv)
     }
 
     const auto reconstructed = reconstructScientificFrameCpu(file, frame);
+    for (uint32_t sample = 0; sample < 257u; ++sample) {
+        const uint32_t x = (sample * 37u + (sample / 7u)) % file.header.width;
+        const uint32_t y = (sample * 73u + (sample / 11u)) % file.header.height;
+        const uint32_t z = (sample * 109u + (sample / 13u)) % file.header.depth;
+        Query4D query{};
+        query.x = x;
+        query.y = y;
+        query.z = z;
+        query.t = frame;
+        query.leafIndex = leafIndexForVoxel(file.header, x, y, z);
+        const size_t index = (static_cast<size_t>(z) * file.header.height + y) * file.header.width + x;
+        const float scalar = decodeScientificValueAtCpu(file, query);
+        if (std::memcmp(&reconstructed[index], &scalar, sizeof(float)) != 0) {
+            std::cerr << "Frame/scalar decode mismatch at " << x << "," << y << "," << z << "\n";
+            return 6;
+        }
+    }
     std::ofstream out(output, std::ios::binary);
     if (!out) {
         std::cerr << "Failed to open output raw: " << output.string() << "\n";

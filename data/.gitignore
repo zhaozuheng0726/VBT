@@ -1,2 +1,9 @@
 **/*.vbtp
 **/*.metadata.json
+source/jangafx/archives/
+source/jangafx/openvdb/
+source/jangafx/matched_openvdb/
+source/jangafx/previews/
+source/jangafx/presets/
+source/jangafx/nanovdb/
+source/jangafx/vbt_source_subset/

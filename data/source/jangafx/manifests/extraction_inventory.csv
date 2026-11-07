@@ -1,0 +1,3 @@
+﻿"dataset","official_name","archive","archive_bytes","vdb_frames_official","vdb_bytes_official","vbt_matched_frames","matched_source_vdb_bytes","first_frame_float_grids","preview_files","preview_bytes","preset_files"
+"dust_devil","Dust Devil (Tornado)","Dust_Devil.rar","443091668","101","616587146","101","616587146","density","0","0","0"
+"ground_explosion","Ground Explosion","GroundExplosionVDB.zip","694118838","200","1335258277","200","1335258277","density flames","1","3569017","1"

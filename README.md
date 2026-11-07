@@ -21,15 +21,15 @@ dense sequence to be reconstructed first.
   sequences, and MP4 export.
 - **No training stage.** Compression is metadata-driven and deterministic. A
   new dataset does not require network training or inference infrastructure.
-- **Measured end to end.** The repository includes format tests, frame mapping
-  checks, image alignment contracts, GPU timestamp benchmarks, and compact
-  cache memory accounting.
+- **Measured at explicit boundaries.** Format tests, frame mapping, matched
+  images, GPU timestamps, and cache allocation are reported separately; GPU
+  equivalent FPS is not desktop presentation FPS.
 
 | Data route | Preserved signal | Direct consumers |
 | --- | --- | --- |
 | Scientific Grid4 | bulk accuracy, sparse events, bounded tails | CPU/CUDA query tools, slice analysis |
 | Smoke / fire | density, flames, temperature over time | Vulkan, Blender/Cycles bridges |
-| Mode2 liquid | `phi=0` topology, thin sheets, droplets, spray | Fast Surface, Physical Water |
+| Mode2 liquid | sign-aware `phi=0` surface details, subject to source voxelization | Fast Surface, Physical Water |
 
 ## Visual Fidelity
 
@@ -57,18 +57,19 @@ the same Cycles contract on each side.
 ### Mode2 Dynamic Liquid
 
 Mode2 stores shell residuals around the level-set surface and enforces
-sign-aware crossings. This preserves sheets and detached spray while rejecting
-the false granular volume box produced by unsupported near-zero samples.
+sign-aware crossings. It reduces near-surface loss and rejects the false
+granular volume box produced by unsupported near-zero samples, but neither
+the source voxelization nor the compression guarantees every small droplet.
 
 ![Dynamic level-set and Mode2 comparison](docs/images/fluid_dynamic_comparison.png)
 
 | Profile | Compression | Field PSNR | Compression-only render SSIM | Mode2 Chamfer-L1 | Fast Surface GPU FPS |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Quality 0.5 | 46.53x | 52.3393 dB | 0.99496 | 0.000143 | 142.7 |
-| Performance 0.75 | 36.26x | 53.4012 dB | 0.99549 | 0.000189 | 213.0 |
+| Quality 0.5 | 46.53x | 52.3393 dB | 0.99496 | 0.000143 | 193.64 |
+| Performance 0.75 | 36.26x | 53.4012 dB | 0.99549 | 0.000189 | 311.16 |
 
-The FPS values use the current compact-cache binary at `960 x 550`; they are
-GPU timestamp throughput and exclude file loading and PNG encoding.
+The FPS values use the current compact-cache path at frame 72 and `960 x 550`;
+they are GPU timestamp throughput and exclude file loading and PNG encoding.
 
 ## VBT Studio
 
@@ -96,21 +97,26 @@ The engine includes:
 
 A GPU-built active-leaf page table decodes temporal controls once per active
 leaf and selected frame. Camera and material changes reuse that cache. The
-optimized images are byte-identical to the retained direct-decoder images.
+measured images are byte-identical to the retained direct-decoder images.
 
 ![VBT Studio GPU performance](docs/images/vbtstudio_gpu_performance.png)
 
-| Workload | Direct decode | Compact cache | Speedup | Cache VRAM saved |
-| --- | ---: | ---: | ---: | ---: |
-| Industrial smoke | 15.157 ms | 3.051 ms | 4.967x | 72.9% |
-| Ground Physical Fire | 75.321 ms | 7.506 ms | 10.035x | 62.1% |
-| Aerial Physical Fire | 100.581 ms | 16.916 ms | 5.946x | 67.0% |
-| Fluid performance | 67.172 ms | 7.865 ms | 8.541x | 0.0% |
-| Fluid quality | 86.722 ms | 14.573 ms | 5.951x | 0.0% |
+| Workload | Direct GPU ms | Fixed GPU ms | Compact GPU ms | Compact equivalent FPS | Cache allocation saved |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Industrial smoke | 13.311 | 2.715 | 2.730 | 366.32 | 72.9% |
+| Ground Physical Fire | 21.338 | 5.270 | 5.357 | 186.66 | 62.1% |
+| Aerial Physical Fire | 64.879 | 13.035 | 13.099 | 76.34 | 67.0% |
+| Fluid performance | 24.245 | 3.155 | 3.214 | 311.16 | 0.0% |
+| Fluid quality | 33.440 | 4.755 | 5.164 | 193.64 | 0.0% |
 
-Mode2 leaves are all active by construction, so liquid profiles retain the
-decode speedup but do not claim a false active-leaf memory reduction. Aerial
-three-field cache allocation decreases from 1,791.04 MiB to 590.32 MiB.
+These are means of three independent process means after fixed warmup, at
+960 x 550. GPU timestamps exclude file loading, PNG export, and UI display.
+Predecoding is faster than direct temporal lookup in these contracts; Compact
+is not consistently faster than Fixed. Its additional benefit is lower
+allocated current-frame cache bytes for sparse smoke and fire. Liquid leaves
+are all active, so their cache allocation does not shrink. Aerial three-field
+allocation decreases from 1,791.04 MiB to 590.32 MiB. See the CSV below for
+the exact frame and step contracts.
 
 ## Scientific Fields
 
@@ -134,6 +140,10 @@ plots use the same frame and slice for Original, VBT, zfp, and both error maps.
 VBT has lower MaxAbs error in all eight cases. J3 and J4 are explicitly marked
 as `minimum-rate`: zfp cannot reach the smaller VBT sizes below its 0.25 bpv
 4D minimum, so those two rows are not presented as strict same-size matches.
+At six near-size points, VBT has higher RMSE than zfp; an extended saved-file
+rate-distortion sweep also found zfp-dominant operating points. The scientific
+route demonstrates common addressing and multi-field queries, not universal
+numerical compression superiority.
 
 ## Public Result Data
 

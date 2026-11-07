@@ -10,6 +10,10 @@ reports/
 VBTStudio/validation/
 VBTStudio/scripts/
 /list.md
+/experiments/
+/CVM2027/
+/VBTFieldLab/
+/software_copyright/
 /vbtstudio_layout.ini
 scripts/finalize_thesis_package.py
 scripts/run_thesis_vbtstudio_contracts.py
@@ -26,6 +30,7 @@ scripts/run_gpu_batch_sweep_all.py
 __pycache__/
 *.pyc
 *.log
+*.etl
 *.trace.txt
 *.mp4
 *.vbtp
@@ -37,3 +42,6 @@ __pycache__/
 3D/data/**/*.abc
 3D/data/**/*.blend
 3D/data/smoke/
+third_party/aria2_portable/
+software_copyright/source_identification/
+software_copyright/document_identification/

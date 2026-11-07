@@ -294,6 +294,42 @@ float decodeSparseResidualAt(const VbtFile& file,
     return 0.0f;
 }
 
+float decodeScientificResidualAt(const VbtFile& file,
+                                 uint32_t payloadByteBase,
+                                 const ScientificHeaderV2& decoded,
+                                 int coarseKeep,
+                                 uint32_t localIndex,
+                                 uint32_t lx,
+                                 uint32_t ly,
+                                 uint32_t lz,
+                                 uint32_t frameIndex)
+{
+    switch (decoded.mode) {
+    case ScientificMode::CoarseOnly:
+        return 0.0f;
+    case ScientificMode::SparseEvents:
+        return decodeSparseResidualAt(file, payloadByteBase, decoded, coarseKeep, localIndex, frameIndex);
+    case ScientificMode::DenseGrid3:
+        return (decoded.denseSubtype == kScientificDenseSubtypeTemporalBasis)
+            ? decodeDenseTemporalBasisAt(file, payloadByteBase, coarseKeep, 3,
+                                         static_cast<int>(decoded.denseQuantBits),
+                                         static_cast<int>(decoded.denseTemporalKeepMinus1 + 1u),
+                                         lx, ly, lz, frameIndex)
+            : decodeDenseValueAt(file, payloadByteBase, coarseKeep, 3,
+                                 static_cast<int>(decoded.denseQuantBits), lx, ly, lz, frameIndex);
+    case ScientificMode::DenseGrid4:
+        return (decoded.denseSubtype == kScientificDenseSubtypeTemporalBasis)
+            ? decodeDenseTemporalBasisAt(file, payloadByteBase, coarseKeep, 4,
+                                         static_cast<int>(decoded.denseQuantBits),
+                                         static_cast<int>(decoded.denseTemporalKeepMinus1 + 1u),
+                                         lx, ly, lz, frameIndex)
+            : decodeDenseValueAt(file, payloadByteBase, coarseKeep, 4,
+                                 static_cast<int>(decoded.denseQuantBits), lx, ly, lz, frameIndex);
+    default:
+        return 0.0f;
+    }
+}
+
 } // namespace
 
 float decodeScientificValueAtCpu(const VbtFile& file, const Query4D& query)
@@ -318,41 +354,8 @@ float decodeScientificValueAtCpu(const VbtFile& file, const Query4D& query)
     }
     const float coarse = sampleCoarseAt(coarseCtrl, lx, ly, lz);
 
-    float residual = 0.0f;
-    switch (decoded.mode) {
-    case ScientificMode::CoarseOnly:
-        residual = 0.0f;
-        break;
-    case ScientificMode::SparseEvents:
-        residual = decodeSparseResidualAt(file, payloadByteBase, decoded, coarseKeep, lidx, query.t);
-        break;
-    case ScientificMode::DenseGrid3:
-        residual = (decoded.denseSubtype == kScientificDenseSubtypeTemporalBasis)
-            ? decodeDenseTemporalBasisAt(file,
-                                         payloadByteBase,
-                                         coarseKeep,
-                                         3,
-                                         static_cast<int>(decoded.denseQuantBits),
-                                         static_cast<int>(decoded.denseTemporalKeepMinus1 + 1u),
-                                         lx, ly, lz, query.t)
-            : decodeDenseValueAt(file, payloadByteBase, coarseKeep, 3, static_cast<int>(decoded.denseQuantBits), lx, ly, lz, query.t);
-        break;
-    case ScientificMode::DenseGrid4:
-        residual = (decoded.denseSubtype == kScientificDenseSubtypeTemporalBasis)
-            ? decodeDenseTemporalBasisAt(file,
-                                         payloadByteBase,
-                                         coarseKeep,
-                                         4,
-                                         static_cast<int>(decoded.denseQuantBits),
-                                         static_cast<int>(decoded.denseTemporalKeepMinus1 + 1u),
-                                         lx, ly, lz, query.t)
-            : decodeDenseValueAt(file, payloadByteBase, coarseKeep, 4, static_cast<int>(decoded.denseQuantBits), lx, ly, lz, query.t);
-        break;
-    default:
-        residual = 0.0f;
-        break;
-    }
-    return coarse + residual;
+    return coarse + decodeScientificResidualAt(file, payloadByteBase, decoded, coarseKeep,
+                                               lidx, lx, ly, lz, query.t);
 }
 
 std::vector<float> reconstructScientificFrameCpu(const VbtFile& file, uint32_t frameIndex)
@@ -364,17 +367,41 @@ std::vector<float> reconstructScientificFrameCpu(const VbtFile& file, uint32_t f
         throw std::runtime_error("Frame too large to reconstruct into memory.");
     }
     std::vector<float> frame(static_cast<size_t>(voxelCount), 0.0f);
-    for (uint32_t z = 0; z < file.header.depth; ++z) {
-        for (uint32_t y = 0; y < file.header.height; ++y) {
-            for (uint32_t x = 0; x < file.header.width; ++x) {
-                Query4D q{};
-                q.x = x;
-                q.y = y;
-                q.z = z;
-                q.t = frameIndex;
-                q.leafIndex = leafIndexForVoxel(file.header, x, y, z);
-                const size_t idx = static_cast<size_t>((static_cast<uint64_t>(z) * file.header.height + y) * file.header.width + x);
-                frame[idx] = decodeScientificValueAtCpu(file, q);
+    const uint32_t leafSize = file.header.leafSize;
+    const uint32_t leavesX = (file.header.width + leafSize - 1u) / leafSize;
+    const uint32_t leavesY = (file.header.height + leafSize - 1u) / leafSize;
+    const uint32_t leavesZ = (file.header.depth + leafSize - 1u) / leafSize;
+    for (uint32_t bz = 0; bz < leavesZ; ++bz) {
+        for (uint32_t by = 0; by < leavesY; ++by) {
+            for (uint32_t bx = 0; bx < leavesX; ++bx) {
+                const uint32_t leafIndex = (bz * leavesY + by) * leavesX + bx;
+                const ScientificHeaderV2 decoded = decodeScientificHeaderV2(readPackedHeaderWord(file, leafIndex));
+                const uint32_t payloadByteBase = file.offsetsWords.at(leafIndex) * 4u;
+                const int coarseKeep = static_cast<int>(decoded.coarseKeepMinus1 + 1u);
+                std::array<float, 64> coarseCtrl{};
+                for (int i = 0; i < 64; ++i) {
+                    coarseCtrl[static_cast<size_t>(i)] =
+                        decodeCoarseControlAt(file, payloadByteBase, coarseKeep, i, static_cast<int>(frameIndex));
+                }
+                const uint32_t x0 = bx * leafSize;
+                const uint32_t y0 = by * leafSize;
+                const uint32_t z0 = bz * leafSize;
+                for (uint32_t z = z0; z < std::min(z0 + leafSize, file.header.depth); ++z) {
+                    for (uint32_t y = y0; y < std::min(y0 + leafSize, file.header.height); ++y) {
+                        for (uint32_t x = x0; x < std::min(x0 + leafSize, file.header.width); ++x) {
+                            const uint32_t lx = x - x0;
+                            const uint32_t ly = y - y0;
+                            const uint32_t lz = z - z0;
+                            const uint32_t localIndex = (lz * leafSize + ly) * leafSize + lx;
+                            const float coarse = sampleCoarseAt(coarseCtrl, lx, ly, lz);
+                            const float residual = decodeScientificResidualAt(
+                                file, payloadByteBase, decoded, coarseKeep, localIndex,
+                                lx, ly, lz, frameIndex);
+                            const size_t idx = static_cast<size_t>((static_cast<uint64_t>(z) * file.header.height + y) * file.header.width + x);
+                            frame[idx] = coarse + residual;
+                        }
+                    }
+                }
             }
         }
     }
